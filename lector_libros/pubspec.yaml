@@ -1,0 +1,28 @@
+name: lector_libros
+description: Lector de libros en voz alta (PDF, EPUB, TXT) con traducción al español.
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.3.0 <4.0.0'
+
+# Sin versiones fijas a propósito: "flutter pub get" baja la última versión
+# compatible de cada paquete.
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_tts:
+  audio_service:
+  file_picker:
+  syncfusion_flutter_pdf:
+  archive:
+  xml:
+  html:
+  google_mlkit_translation:
+  shared_preferences:
+  path_provider:
+  scrollable_positioned_list:
+  google_fonts:
+
+flutter:
+  uses-material-design: true

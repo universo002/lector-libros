@@ -1,0 +1,55 @@
+# Compila la app para iPhone en una Mac de Codemagic y deja un archivo
+# Lector.ipa sin firmar, listo para instalar con Sideloadly desde Windows.
+workflows:
+  iphone-sideloadly:
+    name: iPhone para Sideloadly
+    instance_type: mac_mini_m2
+    max_build_duration: 45
+    environment:
+      flutter: stable
+      xcode: latest
+      cocoapods: default
+    scripts:
+      - name: Crear la carpeta de iOS si no existe
+        script: |
+          if [ ! -d ios ]; then
+            flutter create --platforms=ios --org com.banessa --project-name lector_libros .
+          fi
+
+      - name: Ajustes de iOS (segundo plano, archivos, versión mínima)
+        script: |
+          PLIST=ios/Runner/Info.plist
+          PB=/usr/libexec/PlistBuddy
+          $PB -c "Delete :UIBackgroundModes" $PLIST 2>/dev/null || true
+          $PB -c "Add :UIBackgroundModes array" $PLIST
+          $PB -c "Add :UIBackgroundModes:0 string audio" $PLIST
+          $PB -c "Delete :UIFileSharingEnabled" $PLIST 2>/dev/null || true
+          $PB -c "Add :UIFileSharingEnabled bool true" $PLIST
+          $PB -c "Delete :LSSupportsOpeningDocumentsInPlace" $PLIST 2>/dev/null || true
+          $PB -c "Add :LSSupportsOpeningDocumentsInPlace bool true" $PLIST
+          $PB -c "Set :CFBundleDisplayName Lector" $PLIST 2>/dev/null || $PB -c "Add :CFBundleDisplayName string Lector" $PLIST
+
+          # El traductor de Google necesita iOS 15.5 o más nuevo.
+          if grep -q "^platform :ios" ios/Podfile; then
+            sed -i '' "s/^platform :ios.*/platform :ios, '15.5'/" ios/Podfile
+          elif grep -q "^# platform :ios" ios/Podfile; then
+            sed -i '' "s/^# platform :ios.*/platform :ios, '15.5'/" ios/Podfile
+          else
+            { echo "platform :ios, '15.5'"; cat ios/Podfile; } > Podfile.tmp && mv Podfile.tmp ios/Podfile
+          fi
+          sed -i '' 's/IPHONEOS_DEPLOYMENT_TARGET = [0-9.]*;/IPHONEOS_DEPLOYMENT_TARGET = 15.5;/g' ios/Runner.xcodeproj/project.pbxproj
+
+      - name: Descargar paquetes
+        script: |
+          flutter pub get
+          cd ios && pod install --repo-update
+
+      - name: Compilar y armar el .ipa
+        script: |
+          flutter build ios --release --no-codesign
+          rm -rf build/ipa && mkdir -p build/ipa/Payload
+          cp -R build/ios/iphoneos/Runner.app build/ipa/Payload/
+          cd build/ipa && zip -qr Lector.ipa Payload
+
+    artifacts:
+      - build/ipa/Lector.ipa

@@ -58,7 +58,9 @@ workflows:
       - name: Compilar y armar el .ipa
         script: |
           #!/bin/bash
-          set -eo pipefail
+          set -e
+          mkdir -p build/logs
+          XC_FAIL=0
           xcodebuild \
             -workspace ios/Runner.xcworkspace \
             -scheme Runner \
@@ -69,12 +71,22 @@ workflows:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
-            build 2>&1 | grep -E "error:|warning: .*deprecated|BUILD (SUCCEEDED|FAILED)|\*\* " | tail -n 120 || true
-          echo "--- fin de xcodebuild ---"
+            build > build/logs/xcodebuild.log 2>&1 || XC_FAIL=1
+
+          echo "===== Líneas con errores ====="
+          grep -inE "error|failed|undefined|cannot|not found" build/logs/xcodebuild.log | grep -v "warning:" | tail -n 120 || true
+
+          if [ "$XC_FAIL" = "1" ]; then
+            echo ""
+            echo "===== Final del registro de Xcode ====="
+            tail -n 150 build/logs/xcodebuild.log
+            exit 1
+          fi
 
           APP=build/dd/Build/Products/Release-iphoneos/Runner.app
-          if [ ! -d "$APP" ]; then
-            echo "No se generó Runner.app"
+          if [ ! -f "$APP/Frameworks/App.framework/App" ]; then
+            echo "La app quedó incompleta (falta App.framework)"
+            ls -la "$APP" "$APP/Frameworks" || true
             exit 1
           fi
           rm -rf build/ipa && mkdir -p build/ipa/Payload
@@ -84,3 +96,4 @@ workflows:
 
     artifacts:
       - build/ipa/Lector.ipa
+      - build/logs/*.log

@@ -10,10 +10,11 @@ workflows:
       xcode: latest
       cocoapods: default
     scripts:
-      - name: Preparar Flutter (usar CocoaPods en vez de Swift Package Manager)
+      - name: Preparar Flutter
         script: |
           set -e
-          flutter config --no-enable-swift-package-manager
+          # El traductor de Google solo funciona con Swift Package Manager.
+          flutter config --enable-swift-package-manager
           flutter --version
 
       - name: Crear la carpeta de iOS si no existe

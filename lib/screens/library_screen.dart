@@ -22,7 +22,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
   String? _error;
 
   Future<void> _add() async {
-    final res = await FilePicker.platform.pickFiles(type: FileType.custom, allowedExtensions: ['pdf', 'epub', 'txt']);
+    final res = await FilePicker.pickFiles(type: FileType.custom, allowedExtensions: ['pdf', 'epub', 'txt']);
     final path = res?.files.single.path;
     if (path == null) return;
     setState(() {

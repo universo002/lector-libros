@@ -110,7 +110,11 @@ ThemeData buildTheme(ReadingTheme t) {
     ),
   );
   return base.copyWith(
-    textTheme: GoogleFonts.figtreeTextTheme(base.textTheme).apply(bodyColor: p.fg, displayColor: p.fg),
+    textTheme: base.textTheme.apply(
+      fontFamily: GoogleFonts.figtree().fontFamily,
+      bodyColor: p.fg,
+      displayColor: p.fg,
+    ),
   );
 }
 

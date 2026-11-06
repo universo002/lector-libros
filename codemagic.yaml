@@ -4,20 +4,28 @@ workflows:
   iphone-sideloadly:
     name: iPhone para Sideloadly
     instance_type: mac_mini_m2
-    max_build_duration: 45
+    max_build_duration: 60
     environment:
       flutter: stable
       xcode: latest
       cocoapods: default
     scripts:
+      - name: Preparar Flutter (usar CocoaPods en vez de Swift Package Manager)
+        script: |
+          set -e
+          flutter config --no-enable-swift-package-manager
+          flutter --version
+
       - name: Crear la carpeta de iOS si no existe
         script: |
+          set -e
           if [ ! -d ios ]; then
             flutter create --platforms=ios --org com.banessa --project-name lector_libros .
           fi
 
       - name: Ajustes de iOS (segundo plano, archivos, versión mínima)
         script: |
+          set -e
           PLIST=ios/Runner/Info.plist
           PB=/usr/libexec/PlistBuddy
           $PB -c "Delete :UIBackgroundModes" $PLIST 2>/dev/null || true
@@ -41,15 +49,37 @@ workflows:
 
       - name: Descargar paquetes
         script: |
+          set -e
           flutter pub get
-          cd ios && pod install --repo-update
+          # Genera la configuración de Xcode y corre pod install.
+          flutter build ios --release --no-codesign --config-only
 
       - name: Compilar y armar el .ipa
         script: |
-          flutter build ios --release --no-codesign
+          #!/bin/bash
+          set -eo pipefail
+          xcodebuild \
+            -workspace ios/Runner.xcworkspace \
+            -scheme Runner \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build/dd \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build 2>&1 | grep -E "error:|warning: .*deprecated|BUILD (SUCCEEDED|FAILED)|\*\* " | tail -n 120 || true
+          echo "--- fin de xcodebuild ---"
+
+          APP=build/dd/Build/Products/Release-iphoneos/Runner.app
+          if [ ! -d "$APP" ]; then
+            echo "No se generó Runner.app"
+            exit 1
+          fi
           rm -rf build/ipa && mkdir -p build/ipa/Payload
-          cp -R build/ios/iphoneos/Runner.app build/ipa/Payload/
-          cd build/ipa && zip -qr Lector.ipa Payload
+          cp -R "$APP" build/ipa/Payload/
+          cd build/ipa && zip -qry Lector.ipa Payload
+          ls -lh Lector.ipa
 
     artifacts:
       - build/ipa/Lector.ipa

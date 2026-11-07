@@ -1,18 +1,20 @@
+import 'dart:io';
+
 import 'package:audio_service/audio_service.dart';
 import 'package:flutter/material.dart';
+import 'package:path_provider/path_provider.dart';
 
 import 'library.dart';
 import 'prefs.dart';
 import 'reader_engine.dart';
 import 'screens/library_screen.dart';
 import 'theme.dart';
-import 'voices.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Prefs.I.load();
   await Library.I.init();
-  await Voices.I.init();
+  await _cleanOldVoices();
   await ReaderEngine.I.init();
   try {
     final handler = await AudioService.init(
@@ -28,6 +30,15 @@ Future<void> main() async {
     // Si fallan los controles de la pantalla bloqueada, la app sigue andando igual.
   }
   runApp(const LectorApp());
+}
+
+/// Borra las voces de la versión anterior para liberar espacio (unos 180 MB).
+Future<void> _cleanOldVoices() async {
+  try {
+    final docs = await getApplicationDocumentsDirectory();
+    final d = Directory('${docs.path}/voces');
+    if (await d.exists()) await d.delete(recursive: true);
+  } catch (_) {}
 }
 
 class LectorApp extends StatelessWidget {

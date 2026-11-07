@@ -4,7 +4,6 @@ import '../prefs.dart';
 import '../reader_engine.dart';
 import '../theme.dart';
 import '../translator.dart';
-import '../voices.dart';
 
 Future<void> _sheet(BuildContext context, WidgetBuilder builder, {bool tall = false}) {
   return showModalBottomSheet(
@@ -28,155 +27,14 @@ Widget _title(BuildContext c, String t, {String? sub}) => Padding(
       ]),
     );
 
-// ------------------------------------------------------------ reproducir (o pedir voz)
+// ------------------------------------------------------------ reproducir
 
-/// Si todavía no hay ninguna voz natural descargada, ofrece descargar una.
-Future<void> playOrAskVoice(BuildContext context) async {
-  final e = ReaderEngine.I;
-  if (e.playing) {
-    await e.pause();
-    return;
-  }
-  final needs = !Prefs.I.useSystemVoice && !Voices.I.isReady(e.narratorVoice);
-  if (!needs) {
-    await e.play();
-    return;
-  }
-  await _sheet(context, (c) => const _VoiceOnboarding());
-  if (Voices.I.isReady(e.narratorVoice) || Prefs.I.useSystemVoice) {
-    await e.voicesChanged();
-    await e.play();
-  }
-}
+Future<void> playOrAskVoice(BuildContext context) => ReaderEngine.I.toggle();
 
-class _VoiceOnboarding extends StatefulWidget {
-  const _VoiceOnboarding();
-  @override
-  State<_VoiceOnboarding> createState() => _VoiceOnboardingState();
-}
-
-class _VoiceOnboardingState extends State<_VoiceOnboarding> {
-  bool _busy = false;
-
-  Future<void> _download() async {
-    setState(() => _busy = true);
-    final e = ReaderEngine.I;
-    final narr = e.narratorVoice ?? voiceById('daniela')!;
-    final ok = await Voices.I.download(narr);
-    if (ok && !e.readingEnglish && Prefs.I.dialogueVoice) {
-      final d = voiceById(Prefs.I.dialogue);
-      if (d != null) await Voices.I.download(d);
-    }
-    if (!mounted) return;
-    setState(() => _busy = false);
-    if (ok) Navigator.pop(context);
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final p = pal(context);
-    final e = ReaderEngine.I;
-    final narr = e.narratorVoice ?? voiceById('daniela')!;
-    final dia = (!e.readingEnglish && Prefs.I.dialogueVoice) ? voiceById(Prefs.I.dialogue) : null;
-    final mb = narr.approxMb + (dia != null && dia.dir != narr.dir ? dia.approxMb : 0);
-    return ListenableBuilder(
-      listenable: Voices.I,
-      builder: (context, _) {
-        final downloading = Voices.I.isDownloading(narr) || (dia != null && Voices.I.isDownloading(dia));
-        final prog = Voices.I.progress[narr.dir] ?? (dia != null ? Voices.I.progress[dia.dir] : null);
-        final err = Voices.I.errors[narr.dir] ?? (dia != null ? Voices.I.errors[dia.dir] : null);
-        return Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Container(
-            width: 56,
-            height: 56,
-            decoration: BoxDecoration(color: p.hl, borderRadius: BorderRadius.circular(18)),
-            child: Icon(Icons.graphic_eq_rounded, color: p.accent, size: 30),
-          ),
-          const SizedBox(height: 16),
-          _title(context, 'Descargá una voz natural',
-              sub: 'Las voces naturales suenan mucho más humanas que las del iPhone y funcionan sin internet. '
-                  'Se descargan una sola vez.'),
-          _VoiceRow(v: narr, role: 'Narrador'),
-          if (dia != null && dia.id != narr.id) _VoiceRow(v: dia, role: 'Diálogos'),
-          const SizedBox(height: 14),
-          if (downloading || _busy) ...[
-            ClipRRect(
-              borderRadius: BorderRadius.circular(4),
-              child: LinearProgressIndicator(
-                value: prog == null || prog < 0 ? null : prog,
-                minHeight: 6,
-                color: p.accent,
-                backgroundColor: p.line,
-              ),
-            ),
-            const SizedBox(height: 8),
-            Text(prog != null && prog < 0 ? 'Instalando la voz…' : 'Descargando… podés dejar la pantalla abierta.',
-                style: TextStyle(color: p.muted)),
-          ] else ...[
-            if (err != null) Padding(padding: const EdgeInsets.only(bottom: 10), child: Text(err, style: TextStyle(color: p.accent))),
-            SizedBox(
-              width: double.infinity,
-              child: FilledButton.icon(
-                onPressed: _download,
-                icon: const Icon(Icons.download_rounded),
-                label: Text('Descargar y escuchar (≈ $mb MB)'),
-              ),
-            ),
-            const SizedBox(height: 8),
-            SizedBox(
-              width: double.infinity,
-              child: TextButton(
-                onPressed: () {
-                  Prefs.I.setUseSystemVoice(true);
-                  Navigator.pop(context);
-                },
-                child: const Text('Usar la voz del iPhone por ahora'),
-              ),
-            ),
-          ],
-        ]);
-      },
-    );
-  }
-}
-
-class _VoiceRow extends StatelessWidget {
-  final VoiceInfo v;
-  final String role;
-  const _VoiceRow({required this.v, required this.role});
-
-  @override
-  Widget build(BuildContext context) {
-    final p = pal(context);
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 6),
-      child: Row(children: [
-        CircleAvatar(
-          radius: 20,
-          backgroundColor: p.surface2,
-          child: Text(v.name.substring(0, 1), style: TextStyle(fontWeight: FontWeight.w800, color: p.fg)),
-        ),
-        const SizedBox(width: 12),
-        Expanded(
-          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text('${v.name} · ${v.region}', style: const TextStyle(fontWeight: FontWeight.w700)),
-            Text(v.description, style: TextStyle(color: p.muted, fontSize: 13)),
-          ]),
-        ),
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 3),
-          decoration: BoxDecoration(color: p.hl, borderRadius: BorderRadius.circular(20)),
-          child: Text(role, style: TextStyle(color: p.accent, fontSize: 11.5, fontWeight: FontWeight.w800)),
-        ),
-      ]),
-    );
-  }
-}
-
-// ------------------------------------------------------------ voces
+// ------------------------------------------------------------ voz
 
 void showVoiceSheet(BuildContext context) {
-  ReaderEngine.I.loadSystemVoices();
+  ReaderEngine.I.loadVoices();
   _sheet(context, tall: true, (c) => const _VoiceSheet());
 }
 
@@ -188,84 +46,97 @@ class _VoiceSheet extends StatelessWidget {
     final p = pal(context);
     final e = ReaderEngine.I;
     return ListenableBuilder(
-      listenable: Listenable.merge([Voices.I, Prefs.I, e]),
+      listenable: Listenable.merge([Prefs.I, e]),
       builder: (context, _) {
-        final sys = Prefs.I.useSystemVoice;
-        final spanish = voiceCatalog.where((v) => v.lang == 'es').toList();
-        final english = voiceCatalog.where((v) => v.lang == 'en').toList();
+        final pr = Prefs.I;
+        final cur = e.currentVoice;
+        final dv = e.dialogueVoice;
+        final es = e.spanishVoices;
+        final hasGood = es.any((v) => ReaderEngine.quality(v) != 'Estándar');
         return ListView(padding: const EdgeInsets.fromLTRB(22, 0, 22, 28), children: [
-          _title(context, 'Voces'),
-          SegmentedButton<bool>(
-            showSelectedIcon: false,
-            segments: const [
-              ButtonSegment(value: false, label: Text('Naturales'), icon: Icon(Icons.auto_awesome_rounded, size: 18)),
-              ButtonSegment(value: true, label: Text('Del iPhone'), icon: Icon(Icons.phone_iphone_rounded, size: 18)),
-            ],
-            selected: {sys},
-            onSelectionChanged: (s) {
-              Prefs.I.setUseSystemVoice(s.first);
-              e.voicesChanged();
-            },
-          ),
-          const SizedBox(height: 18),
-          if (!sys) ...[
-            Container(
-              padding: const EdgeInsets.all(14),
-              decoration: BoxDecoration(color: p.surface2, borderRadius: BorderRadius.circular(16)),
-              child: Column(children: [
-                Row(children: [
-                  Icon(Icons.forum_outlined, color: p.accent),
-                  const SizedBox(width: 12),
-                  const Expanded(
-                    child: Text('Otra voz para los diálogos', style: TextStyle(fontWeight: FontWeight.w700)),
-                  ),
-                  Switch(
-                    value: Prefs.I.dialogueVoice,
-                    onChanged: (v) {
-                      Prefs.I.setDialogueVoice(v);
-                      e.voicesChanged();
-                    },
-                  ),
-                ]),
-                Text(
-                  'Lo que dicen los personajes (entre rayas o comillas) se lee con la voz de «Diálogos», y la narración con la del «Narrador».',
-                  style: TextStyle(color: p.muted, fontSize: 13, height: 1.4),
-                ),
-              ]),
+          _title(context, 'Voz y lectura'),
+
+          // Diálogos
+          Text('DIÁLOGOS DE LOS PERSONAJES', style: label(p.muted)),
+          const SizedBox(height: 8),
+          SizedBox(
+            width: double.infinity,
+            child: SegmentedButton<DialogueMode>(
+              showSelectedIcon: false,
+              segments: const [
+                ButtonSegment(value: DialogueMode.igual, label: Text('Igual')),
+                ButtonSegment(value: DialogueMode.tono, label: Text('Otro tono')),
+                ButtonSegment(value: DialogueMode.otraVoz, label: Text('Otra voz')),
+              ],
+              selected: {pr.dialogueMode},
+              onSelectionChanged: (s) {
+                pr.setDialogueMode(s.first);
+                e.voicesChanged();
+              },
             ),
-            const SizedBox(height: 18),
-            Text('ESPAÑOL', style: label(p.muted)),
-            const SizedBox(height: 6),
-            for (final v in spanish) _VoiceTile(v: v),
-            const SizedBox(height: 18),
-            Text('INGLÉS (LIBROS SIN TRADUCIR)', style: label(p.muted)),
-            const SizedBox(height: 6),
-            for (final v in english) _VoiceTile(v: v),
-            const SizedBox(height: 12),
-            Text('Las voces se guardan en el celular y funcionan sin internet. Mantené apretada una voz descargada para borrarla.',
-                style: TextStyle(color: p.muted, fontSize: 12.5, height: 1.4)),
-          ] else ...[
+          ),
+          const SizedBox(height: 8),
+          Text(
+            switch (pr.dialogueMode) {
+              DialogueMode.igual => 'Narración y diálogos con la misma voz, con una pausa al cambiar.',
+              DialogueMode.tono => 'Lo que dicen los personajes se lee con un tono un poco más agudo y pausado, y con pausas antes y después.',
+              DialogueMode.otraVoz => dv == null
+                  ? 'Elegí abajo la voz de los diálogos (tocá «Diálogos» en una voz).'
+                  : 'Los diálogos los lee ${dv['name']}.',
+            },
+            style: TextStyle(color: p.muted, fontSize: 13, height: 1.4),
+          ),
+          const SizedBox(height: 8),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: TextButton.icon(
+              onPressed: e.previewDialogue,
+              icon: const Icon(Icons.play_circle_outline_rounded),
+              label: const Text('Escuchar un ejemplo'),
+            ),
+          ),
+          const SizedBox(height: 14),
+
+          // Pausas
+          Text('PAUSAS ENTRE FRASES', style: label(p.muted)),
+          const SizedBox(height: 8),
+          SizedBox(
+            width: double.infinity,
+            child: SegmentedButton<int>(
+              showSelectedIcon: false,
+              segments: const [
+                ButtonSegment(value: 0, label: Text('Cortas')),
+                ButtonSegment(value: 1, label: Text('Normales')),
+                ButtonSegment(value: 2, label: Text('Largas')),
+              ],
+              selected: {pr.pauseLevel},
+              onSelectionChanged: (s) => pr.setPauseLevel(s.first),
+            ),
+          ),
+          const SizedBox(height: 22),
+
+          // Voces
+          Text('VOZ DEL NARRADOR', style: label(p.muted)),
+          const SizedBox(height: 8),
+          if (!hasGood)
             Container(
+              margin: const EdgeInsets.only(bottom: 10),
               padding: const EdgeInsets.all(14),
-              decoration: BoxDecoration(color: p.surface2, borderRadius: BorderRadius.circular(16)),
+              decoration: BoxDecoration(color: p.hl, borderRadius: BorderRadius.circular(16)),
               child: const Text(
-                'Para que suenen un poco mejor: en el iPhone andá a Ajustes › Accesibilidad › Contenido leído › Voces › Español, '
-                'y descargá una voz que diga «Mejorada» o «Premium».',
+                'Para que Mónica suene mucho más clara, descargá su versión mejorada: en el iPhone andá a '
+                'Ajustes › Accesibilidad › Contenido leído › Voces › Español › España › Mónica, y bajá «Mónica (Mejorada)». '
+                'Después volvé acá.',
                 style: TextStyle(height: 1.45),
               ),
             ),
-            const SizedBox(height: 10),
-            for (final v in e.sysVoices)
-              ListTile(
-                contentPadding: EdgeInsets.zero,
-                title: Text(v['name'] ?? ''),
-                subtitle: Text(v['locale'] ?? ''),
-                trailing: e.currentSystemVoice?['name'] == v['name'] && e.currentSystemVoice?['locale'] == v['locale']
-                    ? Icon(Icons.check_circle_rounded, color: p.accent)
-                    : const Icon(Icons.play_circle_outline_rounded),
-                onTap: () => e.setSystemVoice(v),
-              ),
-          ],
+          for (final v in es)
+            _VoiceTile(
+              v: v,
+              selected: cur != null && cur['name'] == v['name'] && cur['locale'] == v['locale'],
+              dialogue: pr.dialogueMode == DialogueMode.otraVoz && dv != null && dv['name'] == v['name'] && dv['locale'] == v['locale'],
+            ),
+          if (es.isEmpty) Text('No encontré voces en español en este iPhone.', style: TextStyle(color: p.muted)),
         ]);
       },
     );
@@ -273,86 +144,63 @@ class _VoiceSheet extends StatelessWidget {
 }
 
 class _VoiceTile extends StatelessWidget {
-  final VoiceInfo v;
-  const _VoiceTile({required this.v});
+  final Map<String, String> v;
+  final bool selected, dialogue;
+  const _VoiceTile({required this.v, required this.selected, required this.dialogue});
+
+  String _region(String l) {
+    final x = l.toLowerCase().replaceAll('_', '-');
+    if (x == 'es-es') return 'España';
+    if (x == 'es-mx') return 'México';
+    if (x == 'es-ar') return 'Argentina';
+    if (x == 'es-us') return 'EE. UU.';
+    if (x == 'es-co') return 'Colombia';
+    if (x == 'es-cl') return 'Chile';
+    return l;
+  }
 
   @override
   Widget build(BuildContext context) {
     final p = pal(context);
     final e = ReaderEngine.I;
-    final ready = Voices.I.isReady(v);
-    final prog = Voices.I.progress[v.dir];
-    final err = Voices.I.errors[v.dir];
-    final isNarr = v.lang == 'es' ? Prefs.I.narrator == v.id : Prefs.I.english == v.id;
-    final isDia = v.lang == 'es' && Prefs.I.dialogue == v.id && Prefs.I.dialogueVoice;
-
-    Widget trailing;
-    if (prog != null) {
-      trailing = SizedBox(
-        width: 28,
-        height: 28,
-        child: CircularProgressIndicator(strokeWidth: 3, value: prog < 0 ? null : prog, color: p.accent),
-      );
-    } else if (!ready) {
-      trailing = OutlinedButton(
-        onPressed: () => Voices.I.download(v),
-        child: Text('${v.approxMb} MB'),
-      );
-    } else {
-      trailing = Row(mainAxisSize: MainAxisSize.min, children: [
-        IconButton(tooltip: 'Escuchar', onPressed: () => e.previewVoice(v), icon: const Icon(Icons.play_circle_outline_rounded)),
-        PopupMenuButton<String>(
-          tooltip: 'Usar',
-          icon: const Icon(Icons.more_vert_rounded),
-          onSelected: (s) {
-            if (s == 'narr') {
-              if (v.lang == 'es') {
-                Prefs.I.setNarrator(v.id);
-              } else {
-                Prefs.I.setEnglish(v.id);
-              }
-            }
-            if (s == 'dia') {
-              Prefs.I.setDialogue(v.id);
-              Prefs.I.setDialogueVoice(true);
-            }
-            if (s == 'del') Voices.I.remove(v);
-            e.voicesChanged();
-          },
-          itemBuilder: (_) => [
-            PopupMenuItem(value: 'narr', child: Text(v.lang == 'es' ? 'Usar como narrador' : 'Usar para inglés')),
-            if (v.lang == 'es') const PopupMenuItem(value: 'dia', child: Text('Usar para diálogos')),
-            const PopupMenuItem(value: 'del', child: Text('Borrar del celular')),
-          ],
-        ),
-      ]);
-    }
-
+    final q = ReaderEngine.quality(v);
     return InkWell(
       borderRadius: BorderRadius.circular(14),
-      onLongPress: ready ? () => Voices.I.remove(v) : null,
+      onTap: () {
+        Prefs.I.setVoice(v['name']!, v['locale']!);
+        e.voicesChanged();
+        e.preview(v);
+      },
       child: Padding(
         padding: const EdgeInsets.symmetric(vertical: 8),
         child: Row(children: [
           CircleAvatar(
-            radius: 22,
-            backgroundColor: isNarr || isDia ? p.accent : p.surface2,
-            child: Text(v.name.substring(0, 1),
-                style: TextStyle(fontWeight: FontWeight.w800, color: isNarr || isDia ? p.onAccent : p.fg)),
+            radius: 21,
+            backgroundColor: selected ? p.accent : p.surface2,
+            child: Text((v['name'] ?? '?').substring(0, 1),
+                style: TextStyle(fontWeight: FontWeight.w800, color: selected ? p.onAccent : p.fg)),
           ),
           const SizedBox(width: 12),
           Expanded(
             child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
               Wrap(spacing: 6, runSpacing: 4, crossAxisAlignment: WrapCrossAlignment.center, children: [
-                Text(v.name, style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 15)),
-                if (isNarr) _Badge(v.lang == 'es' ? 'Narrador' : 'Inglés'),
-                if (isDia) const _Badge('Diálogos'),
+                Text(v['name'] ?? '', style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 15)),
+                if (selected) const _Badge('Narrador'),
+                if (dialogue) const _Badge('Diálogos'),
               ]),
-              Text('${v.region} · ${v.quality}', style: TextStyle(color: p.muted, fontSize: 13)),
-              if (err != null) Text(err, style: TextStyle(color: p.accent, fontSize: 12.5)),
+              Text('${_region(v['locale'] ?? '')} · $q', style: TextStyle(color: p.muted, fontSize: 13)),
             ]),
           ),
-          trailing,
+          if (Prefs.I.dialogueMode == DialogueMode.otraVoz)
+            TextButton(
+              onPressed: () {
+                Prefs.I.setDialogueVoice(v['name']!, v['locale']!);
+                e.voicesChanged();
+                e.preview(v, dialogue: true);
+              },
+              child: const Text('Diálogos'),
+            ),
+          IconButton(tooltip: 'Escuchar', onPressed: () => e.preview(v), icon: const Icon(Icons.play_circle_outline_rounded)),
         ]),
       ),
     );
@@ -458,7 +306,7 @@ class _TranslateSheet extends StatelessWidget {
 // ------------------------------------------------------------ velocidad
 
 void showSpeedSheet(BuildContext context) {
-  const presets = [0.8, 0.9, 1.0, 1.1, 1.25, 1.5];
+  const presets = [0.7, 0.8, 0.9, 1.0, 1.1, 1.25];
   _sheet(context, (c) {
     return ListenableBuilder(
       listenable: Prefs.I,
@@ -484,7 +332,7 @@ void showSpeedSheet(BuildContext context) {
               ),
           ]),
           const SizedBox(height: 12),
-          Text('Con las voces naturales, la velocidad cambia sin distorsionar la voz.', style: TextStyle(color: pal(c).muted)),
+          Text('Para entender mejor, probá entre 0,8× y 0,9×. Para repasar algo que ya conocés, 1,1× o más.', style: TextStyle(color: pal(c).muted, height: 1.4)),
         ]);
       },
     );

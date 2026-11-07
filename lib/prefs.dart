@@ -3,6 +3,9 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'theme.dart';
 
+/// Cómo se leen los diálogos de los personajes.
+enum DialogueMode { igual, tono, otraVoz }
+
 /// Ajustes del usuario que se guardan entre sesiones.
 class Prefs extends ChangeNotifier {
   Prefs._();
@@ -11,36 +14,33 @@ class Prefs extends ChangeNotifier {
   SharedPreferences? _sp;
 
   double fontSize = 19;
-  double speed = 1.0;
+  double speed = 0.9;
   AppTheme theme = AppTheme.auto;
   bool followText = true;
 
-  // Voces naturales
-  String narrator = 'daniela';
-  String dialogue = 'davefx';
-  bool dialogueVoice = true;
-  String english = 'ryan';
-
-  // Voz del iPhone (respaldo)
-  bool useSystemVoice = false;
-  String? sysVoiceName;
-  String? sysVoiceLocale;
+  // Voz
+  String? voiceName;
+  String? voiceLocale;
+  DialogueMode dialogueMode = DialogueMode.tono;
+  String? dialogueVoiceName;
+  String? dialogueVoiceLocale;
+  int pauseLevel = 1; // 0 cortas, 1 normales, 2 largas
 
   Future<void> load() async {
     final s = await SharedPreferences.getInstance();
     _sp = s;
     fontSize = s.getDouble('fontSize') ?? 19;
-    speed = s.getDouble('speed') ?? 1.0;
+    speed = s.getDouble('speed3') ?? 0.9;
     final t = s.getInt('theme2') ?? 0;
     theme = AppTheme.values[t.clamp(0, AppTheme.values.length - 1)];
     followText = s.getBool('followText') ?? true;
-    narrator = s.getString('narrator') ?? 'daniela';
-    dialogue = s.getString('dialogue') ?? 'davefx';
-    dialogueVoice = s.getBool('dialogueVoice') ?? true;
-    english = s.getString('english') ?? 'ryan';
-    useSystemVoice = s.getBool('useSystemVoice') ?? false;
-    sysVoiceName = s.getString('voiceName');
-    sysVoiceLocale = s.getString('voiceLocale');
+    voiceName = s.getString('voiceName');
+    voiceLocale = s.getString('voiceLocale');
+    final dm = s.getInt('dialogueMode') ?? 1;
+    dialogueMode = DialogueMode.values[dm.clamp(0, DialogueMode.values.length - 1)];
+    dialogueVoiceName = s.getString('dialogueVoiceName');
+    dialogueVoiceLocale = s.getString('dialogueVoiceLocale');
+    pauseLevel = (s.getInt('pauseLevel') ?? 1).clamp(0, 2);
   }
 
   void setFontSize(double v) {
@@ -51,7 +51,7 @@ class Prefs extends ChangeNotifier {
 
   void setSpeed(double v) {
     speed = v;
-    _sp?.setDouble('speed', v);
+    _sp?.setDouble('speed3', v);
     notifyListeners();
   }
 
@@ -67,41 +67,31 @@ class Prefs extends ChangeNotifier {
     notifyListeners();
   }
 
-  void setNarrator(String id) {
-    narrator = id;
-    _sp?.setString('narrator', id);
-    notifyListeners();
-  }
-
-  void setDialogue(String id) {
-    dialogue = id;
-    _sp?.setString('dialogue', id);
-    notifyListeners();
-  }
-
-  void setDialogueVoice(bool v) {
-    dialogueVoice = v;
-    _sp?.setBool('dialogueVoice', v);
-    notifyListeners();
-  }
-
-  void setEnglish(String id) {
-    english = id;
-    _sp?.setString('english', id);
-    notifyListeners();
-  }
-
-  void setUseSystemVoice(bool v) {
-    useSystemVoice = v;
-    _sp?.setBool('useSystemVoice', v);
-    notifyListeners();
-  }
-
-  void setSystemVoice(String name, String locale) {
-    sysVoiceName = name;
-    sysVoiceLocale = locale;
+  void setVoice(String name, String locale) {
+    voiceName = name;
+    voiceLocale = locale;
     _sp?.setString('voiceName', name);
     _sp?.setString('voiceLocale', locale);
+    notifyListeners();
+  }
+
+  void setDialogueMode(DialogueMode m) {
+    dialogueMode = m;
+    _sp?.setInt('dialogueMode', m.index);
+    notifyListeners();
+  }
+
+  void setDialogueVoice(String name, String locale) {
+    dialogueVoiceName = name;
+    dialogueVoiceLocale = locale;
+    _sp?.setString('dialogueVoiceName', name);
+    _sp?.setString('dialogueVoiceLocale', locale);
+    notifyListeners();
+  }
+
+  void setPauseLevel(int v) {
+    pauseLevel = v;
+    _sp?.setInt('pauseLevel', v);
     notifyListeners();
   }
 }

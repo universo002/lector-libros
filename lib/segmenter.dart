@@ -92,17 +92,102 @@ void _add(List<Seg> out, String t, int a, int b, bool d) {
   out.add(Seg(a, b, d, speak));
 }
 
+final _abbrevEnd = RegExp(
+  r'\b(Sr|Sra|Srta|Sres|Dr|Dra|Ud|Uds|Vd|Vds|etc|pág|págs|núm|aprox|Lic|Ing|Prof|Mr|Mrs|Ms|St|vs|Jr|cap|vol)\.$',
+  caseSensitive: false,
+);
+final _startsLower = RegExp(r'^[a-záéíóúüñ]');
+
 List<Seg> segmentText(String t) {
-  final segs = <Seg>[];
+  final raw = <Seg>[];
   for (final p in _pieces(t)) {
     if (p.end <= p.start) continue;
     final sub = t.substring(p.start, p.end);
     var s = p.start;
     for (final m in _sentenceEnd.allMatches(sub)) {
-      _add(segs, t, s, p.start + m.end, p.dialogue);
+      _add(raw, t, s, p.start + m.end, p.dialogue);
       s = p.start + m.end;
     }
-    _add(segs, t, s, p.end, p.dialogue);
+    _add(raw, t, s, p.end, p.dialogue);
+  }
+  // Une frases que se cortaron mal (después de «Sr.», «etc.» o «…» seguido de minúscula).
+  final segs = <Seg>[];
+  for (final g in raw) {
+    if (segs.isNotEmpty) {
+      final prev = segs.last;
+      final glue = prev.dialogue == g.dialogue &&
+          (_abbrevEnd.hasMatch(prev.speak) || _startsLower.hasMatch(g.speak)) &&
+          prev.speak.length + g.speak.length < 420;
+      if (glue) {
+        segs[segs.length - 1] = Seg(prev.start, g.end, g.dialogue, '${prev.speak} ${g.speak}');
+        continue;
+      }
+    }
+    segs.add(g);
   }
   return segs;
+}
+
+// ------------------------------------------------------------ texto para la voz
+
+const _abbrevEs = {
+  'Sr.': 'señor',
+  'Sra.': 'señora',
+  'Srta.': 'señorita',
+  'Sres.': 'señores',
+  'Dr.': 'doctor',
+  'Dra.': 'doctora',
+  'Ud.': 'usted',
+  'Uds.': 'ustedes',
+  'Vd.': 'usted',
+  'etc.': 'etcétera',
+  'pág.': 'página',
+  'págs.': 'páginas',
+  'núm.': 'número',
+  'aprox.': 'aproximadamente',
+  'Lic.': 'licenciado',
+  'Ing.': 'ingeniero',
+  'Prof.': 'profesor',
+  'Mr.': 'míster',
+  'Mrs.': 'misis',
+};
+
+final _footnote = RegExp(r'(?<=[A-Za-zÁÉÍÓÚáéíóúñÑ;:!?»”])\d{1,3}(?=[\s.,;:]|$)');
+final _symbols = RegExp(r'[*_#~^|<>\[\]{}•·§¶]');
+final _allCaps = RegExp(r'\b[A-ZÁÉÍÓÚÑÜ]{4,}\b');
+final _dots = RegExp(r'\.{3,}');
+final _romanHeading = RegExp(r'\b(cap[ií]tulo|parte|libro|chapter|part|book)\s+([IVXLC]{1,7})\b', caseSensitive: false);
+final _endPunct = RegExp(r'[.!?…:;]["»”’)]*$');
+
+int _roman(String r) {
+  const v = {'I': 1, 'V': 5, 'X': 10, 'L': 50, 'C': 100};
+  var total = 0;
+  for (var i = 0; i < r.length; i++) {
+    final a = v[r[i].toUpperCase()] ?? 0;
+    final b = i + 1 < r.length ? (v[r[i + 1].toUpperCase()] ?? 0) : 0;
+    total += a < b ? -a : a;
+  }
+  return total;
+}
+
+/// Prepara una frase para que la voz la lea clara.
+String speechText(String s, {bool spanish = true}) {
+  var t = s;
+  t = t.replaceAllMapped(_romanHeading, (m) => '${m[1]} ${_roman(m[2]!)}');
+  if (spanish) {
+    _abbrevEs.forEach((k, v) {
+      t = t.replaceAll(RegExp('(?<![A-Za-zÁÉÍÓÚáéíóúñ])${RegExp.escape(k)}'), v);
+    });
+  }
+  t = t.replaceAll(_footnote, '');
+  t = t.replaceAll(_symbols, ' ');
+  t = t.replaceAll(_dots, '…');
+  t = t.replaceAllMapped(_allCaps, (m) {
+    final w = m[0]!;
+    return w[0] + w.substring(1).toLowerCase();
+  });
+  t = t.replaceAll(_spaces, ' ').trim();
+  // Que cada frase cierre con puntuación: la voz baja el tono y hace la pausa.
+  if (t.isNotEmpty && !_endPunct.hasMatch(t)) t = '$t.';
+  return t;
 }

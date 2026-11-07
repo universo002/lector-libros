@@ -29,9 +29,10 @@ class Prefs extends ChangeNotifier {
   bool focusMode = false;
 
   // Voz
-  bool narratorMale = false; // false = Mónica narra; true = la voz de hombre narra
+  bool narratorMale = false; // false = la voz de mujer narra; true = la de hombre
+  bool latino = true; // acento: latino (México) o España
   double speed = 0.9; // velocidad general
-  double speedFemale = 1.0; // ajuste fino de Mónica
+  double speedFemale = 1.0; // ajuste fino de la voz de mujer
   double speedMale = 1.0; // ajuste fino de la voz de hombre
   DialogueMode dialogueMode = DialogueMode.personajes;
   int pauseLevel = 1; // 0 cortas, 1 normales, 2 largas
@@ -53,6 +54,7 @@ class Prefs extends ChangeNotifier {
     followText = s.getBool('followText') ?? true;
     focusMode = s.getBool('focusMode') ?? false;
     narratorMale = s.getBool('narratorMale') ?? false;
+    latino = s.getBool('latino') ?? true;
     speed = s.getDouble('speed3') ?? 0.9;
     speedFemale = s.getDouble('speedFemale') ?? 1.0;
     speedMale = s.getDouble('speedMale') ?? 1.0;
@@ -108,6 +110,12 @@ class Prefs extends ChangeNotifier {
   void setNarratorMale(bool v) {
     narratorMale = v;
     _b('narratorMale', v);
+    notifyListeners();
+  }
+
+  void setLatino(bool v) {
+    latino = v;
+    _b('latino', v);
     notifyListeners();
   }
 

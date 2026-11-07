@@ -67,13 +67,32 @@ class _VoiceSheet extends StatelessWidget {
         final pr = Prefs.I;
         final f = e.female, m = e.male;
         final needsBetter = (f != null && f.quality < 2) || (m != null && m.quality < 2);
+        final fName = pr.latino ? 'Paulina' : 'Mónica';
+        final mName = pr.latino ? 'Juan' : 'Jorge';
+        final region = pr.latino ? 'Español (México)' : 'Español (España)';
         return ListView(padding: const EdgeInsets.fromLTRB(22, 0, 22, 32), children: [
-          _title(context, 'Voces', sub: 'Elegí quién narra y cómo suenan los personajes.'),
+          _title(context, 'Voces', sub: 'Elegí el acento, quién narra y cómo suenan los personajes.'),
+          SizedBox(
+            width: double.infinity,
+            child: SegmentedButton<bool>(
+              showSelectedIcon: false,
+              segments: const [
+                ButtonSegment(value: true, label: Text('Latino')),
+                ButtonSegment(value: false, label: Text('España')),
+              ],
+              selected: {pr.latino},
+              onSelectionChanged: (sel) {
+                pr.setLatino(sel.first);
+                e.voicesChanged(reload: true);
+              },
+            ),
+          ),
+          const SizedBox(height: 14),
           Row(children: [
             Expanded(
               child: _VoiceCard(
                 voice: f,
-                fallbackName: 'Mónica',
+                fallbackName: fName,
                 role: pr.narratorMale ? 'Personajes' : 'Narra',
                 selected: !pr.narratorMale,
                 speed: pr.speedFemale,
@@ -89,7 +108,7 @@ class _VoiceSheet extends StatelessWidget {
             Expanded(
               child: _VoiceCard(
                 voice: m,
-                fallbackName: 'Jorge',
+                fallbackName: mName,
                 role: pr.narratorMale ? 'Narra' : 'Personajes',
                 selected: pr.narratorMale,
                 speed: pr.speedMale,
@@ -114,11 +133,12 @@ class _VoiceSheet extends StatelessWidget {
                   const Expanded(child: Text('Hacelas sonar mucho más naturales', style: TextStyle(fontWeight: FontWeight.w800))),
                 ]),
                 const SizedBox(height: 6),
-                const Text(
-                  'En el iPhone: Ajustes › Accesibilidad › Leer y hablar (Read & Speak) › Voces › Español. '
-                  'Descargá «Mónica (Mejorada)» y «Jorge (Mejorada)». Si buscás «Voces» en Ajustes llegás más rápido. '
-                  'Después cerrá y abrí esta pantalla.',
-                  style: TextStyle(height: 1.45),
+                Text(
+                  '${m == null ? 'Todavía no tenés una voz de hombre instalada. ' : ''}'
+                  'En el iPhone: Ajustes › Accesibilidad › Leer y hablar (Read & Speak) › Voces › Español › $region. '
+                  'Descargá «$fName (Mejorada)» y «$mName (Mejorada)», o «Premium» si aparece. '
+                  'Si no lo encontrás, buscá «Voces» con la lupa de Ajustes. Después cerrá y abrí esta pantalla.',
+                  style: const TextStyle(height: 1.45),
                 ),
               ]),
             ),
@@ -126,7 +146,7 @@ class _VoiceSheet extends StatelessWidget {
           _DialogueOption(
             mode: DialogueMode.personajes,
             title: 'Voces por personaje',
-            sub: 'Detecta si habla un hombre o una mujer («—dijo ella», «respondió el anciano») y usa Mónica o Jorge.',
+            sub: 'Detecta si habla un hombre o una mujer («—dijo ella», «respondió el anciano») y usa la voz que corresponde.',
           ),
           _DialogueOption(
             mode: DialogueMode.otraVoz,
@@ -136,7 +156,7 @@ class _VoiceSheet extends StatelessWidget {
           _DialogueOption(
             mode: DialogueMode.tono,
             title: 'Misma voz, otro tono',
-            sub: 'Los diálogos se leen un poco más agudo y pausado.',
+            sub: 'Los diálogos se leen más pausados (con las voces mejoradas el cambio de tono es leve).',
           ),
           _DialogueOption(
             mode: DialogueMode.igual,
@@ -146,7 +166,7 @@ class _VoiceSheet extends StatelessWidget {
           SwitchListTile(
             contentPadding: EdgeInsets.zero,
             title: const Text('Interpretación', style: TextStyle(fontWeight: FontWeight.w700)),
-            subtitle: const Text('Si el texto dice que alguien susurra o grita, la voz lo acompaña.'),
+            subtitle: const Text('Si el texto dice que alguien susurra, se escucha más bajo y lento; si grita, más rápido y firme.'),
             value: pr.expressive,
             onChanged: (v) {
               pr.setExpressive(v);

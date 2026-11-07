@@ -17,10 +17,14 @@ class HL {
   const HL(this.para, this.start, this.end);
 }
 
+/// Una parte de la cola: una o varias frases seguidas con la misma voz.
 class _Utt {
-  final int id, para, seg, start, end;
+  final int id, para;
+  final List<int> segs; // índices de las frases que contiene
+  final List<int> offs; // dónde empieza cada frase dentro del texto hablado
+  final List<int> starts, ends; // posiciones de cada frase en el texto que se muestra
   final bool lastOfPara, lastOfBook;
-  const _Utt(this.id, this.para, this.seg, this.start, this.end, this.lastOfPara, this.lastOfBook);
+  const _Utt(this.id, this.para, this.segs, this.offs, this.starts, this.ends, this.lastOfPara, this.lastOfBook);
 }
 
 const _novelty = {
@@ -101,6 +105,7 @@ class ReaderEngine extends ChangeNotifier {
     LectorTts.init();
     LectorTts.onStart = _onStart;
     LectorTts.onFinish = _onFinish;
+    LectorTts.onRange = _onRange;
     LectorTts.onInterrupt = _onInterrupt;
     LectorTts.onRouteLost = _onRouteLost;
     await loadVoices();
@@ -113,40 +118,65 @@ class ReaderEngine extends ChangeNotifier {
 
   // ------------------------------------------------------------ voces
 
+  static const _femaleLatam = ['paulina', 'isabela', 'marisol', 'angelica', 'ximena', 'soledad', 'francisca', 'luciana'];
+  static const _maleLatam = ['juan', 'diego', 'carlos', 'andres', 'pablo', 'miguel', 'jorge'];
+  static const _femaleSpain = ['monica', 'marisa', 'lucia', 'carmen', 'paulina'];
+  static const _maleSpain = ['jorge', 'enrique', 'juan', 'diego'];
+  static const _allFemale = [..._femaleLatam, ..._femaleSpain];
+  static const _allMale = [..._maleLatam, ..._maleSpain];
+
   Future<void> loadVoices() async {
     voices = await LectorTts.voices();
-    final usable = voices.where((v) => !_novelty.contains(_norm(v.name))).toList();
+    final usable = voices.where((v) => !_novelty.contains(_norm(v.name).split(' ').first)).toList();
     final es = usable.where((v) => v.lang.toLowerCase().startsWith('es')).toList();
     final en = usable.where((v) => v.lang.toLowerCase().startsWith('en')).toList();
-    female = _best(es, const ['monica', 'paulina', 'marisol', 'isabela', 'angelica', 'soledad', 'francisca'], 2);
-    male = _best(es, const ['jorge', 'juan', 'diego', 'carlos', 'pablo', 'andres'], 1);
-    english = _best(en, const ['ava', 'samantha', 'zoe', 'allison', 'susan', 'evan', 'nathan', 'tom'], 0);
+    final latino = Prefs.I.latino;
+    female = _pick(es, latino ? _femaleLatam : _femaleSpain, 2, latino);
+    male = _pick(es, latino ? _maleLatam : _maleSpain, 1, latino);
+    english = _pick(en, const ['ava', 'samantha', 'zoe', 'allison', 'susan'], 2, false) ??
+        _pick(en, const ['evan', 'nathan', 'tom', 'alex'], 1, false);
     notifyListeners();
   }
 
-  NativeVoice? _best(List<NativeVoice> list, List<String> names, int gender) {
-    int byQuality(NativeVoice a, NativeVoice b) {
-      final q = b.quality.compareTo(a.quality);
-      if (q != 0) return q;
-      // A igual calidad, preferimos español de España (como Mónica y Jorge).
-      final ea = a.lang.toLowerCase() == 'es-es' ? 0 : 1;
-      final eb = b.lang.toLowerCase() == 'es-es' ? 0 : 1;
-      return ea.compareTo(eb);
+  bool _isGender(NativeVoice v, int gender) {
+    final first = _norm(v.name).split(RegExp(r'[\s(]')).first;
+    if (gender == 2) {
+      if (_allMale.contains(first)) return false;
+      return v.gender == 2 || _allFemale.contains(first);
+    }
+    if (_allFemale.contains(first)) return false;
+    return v.gender == 1 || _allMale.contains(first);
+  }
+
+  /// Elige la mejor voz del género pedido: primero el acento, después la calidad.
+  /// Nunca devuelve una voz del otro género.
+  NativeVoice? _pick(List<NativeVoice> list, List<String> names, int gender, bool latino) {
+    final c = list.where((v) => _isGender(v, gender)).toList();
+    if (c.isEmpty) return null;
+    int accent(NativeVoice v) {
+      final spain = v.lang.toLowerCase() == 'es-es';
+      if (!v.lang.toLowerCase().startsWith('es')) return 0;
+      return latino ? (spain ? 1 : 0) : (spain ? 0 : 1);
     }
 
-    for (final n in names) {
-      final c = list.where((v) => _norm(v.name).startsWith(n)).toList()..sort(byQuality);
-      if (c.isNotEmpty) return c.first;
+    int nameRank(NativeVoice v) {
+      final first = _norm(v.name).split(RegExp(r'[\s(]')).first;
+      final i = names.indexOf(first);
+      return i < 0 ? 99 : i;
     }
-    if (gender != 0) {
-      final c = list.where((v) => v.gender == gender).toList()..sort(byQuality);
-      if (c.isNotEmpty) return c.first;
-    }
-    final c = List<NativeVoice>.of(list)..sort(byQuality);
-    return c.isEmpty ? null : c.first;
+
+    c.sort((a, b) {
+      final x = accent(a).compareTo(accent(b));
+      if (x != 0) return x;
+      final q = b.quality.compareTo(a.quality);
+      if (q != 0) return q;
+      return nameRank(a).compareTo(nameRank(b));
+    });
+    return c.first;
   }
 
   NativeVoice? get narrator => Prefs.I.narratorMale ? (male ?? female) : (female ?? male);
+  bool get missingMale => male == null;
   NativeVoice? get otherVoice => Prefs.I.narratorMale ? female : male;
 
   String get currentVoiceLabel {
@@ -375,7 +405,8 @@ class ReaderEngine extends ChangeNotifier {
     return Prefs.I.speedFemale;
   }
 
-  /// Arma las frases con su voz, tono, velocidad y pausas.
+  /// Arma la cola: decide la voz, la velocidad y el volumen de cada frase, y junta
+  /// las frases seguidas que comparten voz (así la entonación fluye entre frases).
   List<Utterance> _build(int para, List<Seg> segs, int from, BookContent c, {bool register = true}) {
     final pr = Prefs.I;
     final narr = narrator;
@@ -384,7 +415,8 @@ class ReaderEngine extends ChangeNotifier {
     final cue = paragraphCue(segs);
     final heading = c.sections.any((s) => s.start == para && s.title != 'Inicio');
     final nextHeading = c.sections.any((s) => s.start == para + 1);
-    final pauseK = const [0.55, 1.0, 1.7][pr.pauseLevel] / pr.speed.clamp(0.6, 1.8);
+    final pauseK = const [0.6, 1.0, 1.6][pr.pauseLevel] / pr.speed.clamp(0.6, 1.8);
+    final groupMax = const [520, 420, 0][pr.pauseLevel]; // con pausas largas, frase por frase
 
     // ¿Quién habla en este párrafo? Si no hay pistas, alternamos (en una charla suelen turnarse).
     var gender = cue.gender;
@@ -395,14 +427,15 @@ class ReaderEngine extends ChangeNotifier {
       if (register) _lastGender = gender;
     }
 
-    final out = <Utterance>[];
-    for (var k = from; k < segs.length; k++) {
+    // Estilo de cada frase.
+    final styles = <({NativeVoice? voice, double rate, double pitch, double volume, String lang})>[];
+    for (var k = 0; k < segs.length; k++) {
       final s = segs[k];
       NativeVoice? voice = narr;
       var pitch = 1.0;
       var volume = 1.0;
       var spd = pr.speed;
-      var lang = 'es-ES';
+      var lang = pr.latino ? 'es-MX' : 'es-ES';
 
       if (english) {
         voice = this.english;
@@ -413,62 +446,98 @@ class ReaderEngine extends ChangeNotifier {
             break;
           case DialogueMode.tono:
             pitch = 1.12;
-            spd *= 0.96;
+            spd *= 0.93;
             break;
           case DialogueMode.otraVoz:
             if (other != null) {
               voice = other;
             } else {
               pitch = 1.12;
+              spd *= 0.93;
             }
             break;
           case DialogueMode.personajes:
             final target = gender == 1 ? male : female;
             voice = target ?? narr;
-            // Si el personaje tiene la misma voz que el narrador, le cambiamos un poco el tono.
-            if (voice?.id == narr?.id) pitch = gender == 1 ? 0.94 : 1.1;
+            if (voice?.id == narr?.id) {
+              pitch = gender == 1 ? 0.92 : 1.1;
+              spd *= 0.94;
+            }
             break;
         }
         if (pr.expressive) {
+          // Las voces mejoradas casi no cambian de tono, así que usamos volumen y velocidad.
           if (cue.tone == 1) {
-            volume = 0.72;
-            spd *= 0.9;
-            pitch -= 0.04;
-          } else if (cue.tone == 2 || s.speak.endsWith('!')) {
-            pitch += 0.06;
-            spd *= 1.03;
+            volume = 0.45;
+            spd *= 0.84;
+          } else if (cue.tone == 2) {
+            spd *= 1.1;
+            pitch += 0.08;
+          } else if (s.speak.endsWith('!')) {
+            spd *= 1.05;
           }
         }
       }
       if (!english) spd *= _voiceFactor(voice);
+      styles.add((voice: voice, rate: _rate(spd), pitch: pitch.clamp(0.75, 1.5).toDouble(), volume: volume, lang: lang));
+    }
 
-      final last = k == segs.length - 1;
+    final out = <Utterance>[];
+    var k = from;
+    while (k < segs.length) {
+      final st = styles[k];
+      final text = StringBuffer();
+      final idxs = <int>[], offs = <int>[], starts = <int>[], ends = <int>[];
+      var j = k;
+      while (j < segs.length) {
+        final sj = styles[j];
+        final same = sj.voice?.id == st.voice?.id && sj.rate == st.rate && sj.pitch == st.pitch && sj.volume == st.volume;
+        if (idxs.isNotEmpty && (!same || segs[j].dialogue != segs[k].dialogue)) break;
+        final t = speechText(segs[j].speak, spanish: !english);
+        if (idxs.isNotEmpty && text.length + t.length > groupMax) break;
+        if (t.isNotEmpty) {
+          if (text.isNotEmpty) text.write(' ');
+          offs.add(text.length);
+          idxs.add(j);
+          starts.add(segs[j].start);
+          ends.add(segs[j].end);
+          text.write(t);
+        }
+        j++;
+        if (groupMax == 0) break;
+      }
+      if (idxs.isEmpty) {
+        k = j;
+        continue;
+      }
+      final lastSeg = idxs.last;
+      final last = j >= segs.length;
       double post;
       if (last) {
         post = (heading || nextHeading) ? 0.95 : 0.5;
       } else {
-        post = segs[k + 1].dialogue != s.dialogue ? 0.34 : 0.13;
+        post = segs[j].dialogue != segs[lastSeg].dialogue ? 0.34 : 0.16;
       }
+      if (st.volume < 0.6) post += 0.1; // un respiro después de un susurro
       final pre = (heading && k == 0) ? 0.25 : 0.0;
 
-      final text = speechText(s.speak, spanish: !english);
-      if (text.isEmpty) continue;
       final id = _nextId++;
       if (register) {
         final lastOfBook = last && para == c.paras.length - 1;
-        _q[id] = _Utt(id, para, k, s.start, s.end, last, lastOfBook);
+        _q[id] = _Utt(id, para, idxs, offs, starts, ends, last, lastOfBook);
       }
       out.add(Utterance(
         id: id,
-        text: text,
-        voiceId: voice?.id,
-        lang: lang,
-        rate: _rate(spd),
-        pitch: pitch.clamp(0.75, 1.5).toDouble(),
-        volume: volume,
+        text: text.toString(),
+        voiceId: st.voice?.id,
+        lang: st.lang,
+        rate: st.rate,
+        pitch: st.pitch,
+        volume: st.volume,
         pre: pre,
         post: post * pauseK,
       ));
+      k = j;
     }
     return out;
   }
@@ -481,12 +550,26 @@ class ReaderEngine extends ChangeNotifier {
       _save();
       notifyListeners();
     }
-    _seg = u.seg;
-    hl.value = HL(u.para, u.start, u.end);
+    _seg = u.segs.first;
+    hl.value = HL(u.para, u.starts.first, u.ends.first);
     _sync();
     // Cuando empieza el último párrafo de la cola, preparamos el siguiente: así no hay cortes.
     if (u.para >= _queuedPara && !_enqueueing && !_haltAfterQueue) {
       _enqueuePara(_queuedPara + 1, _gen);
+    }
+  }
+
+  /// El iPhone avisa qué palabra está diciendo: con eso sabemos en qué frase va.
+  void _onRange(int id, int loc, int len) {
+    final u = _q[id];
+    if (u == null || u.segs.length < 2) return;
+    var j = 0;
+    for (var i = 0; i < u.offs.length; i++) {
+      if (u.offs[i] <= loc) j = i;
+    }
+    if (u.segs[j] != _seg || hl.value?.para != u.para) {
+      _seg = u.segs[j];
+      hl.value = HL(u.para, u.starts[j], u.ends[j]);
     }
   }
 
@@ -616,7 +699,8 @@ class ReaderEngine extends ChangeNotifier {
     await _restartHere();
   }
 
-  Future<void> voicesChanged() async {
+  Future<void> voicesChanged({bool reload = false}) async {
+    if (reload) await loadVoices();
     notifyListeners();
     await _restartHere();
   }

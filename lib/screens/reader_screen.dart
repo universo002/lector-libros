@@ -185,6 +185,14 @@ class _ReaderScreenState extends State<ReaderScreen> {
             },
           ),
           ListTile(
+            leading: const Icon(Icons.edit_note_rounded),
+            title: Text(e.meta!.notes['$i'] == null ? 'Agregar nota' : 'Editar nota'),
+            onTap: () {
+              Navigator.pop(c);
+              showNoteDialog(context, i);
+            },
+          ),
+          ListTile(
             leading: const Icon(Icons.copy_rounded),
             title: const Text('Copiar párrafo'),
             onTap: () {
@@ -231,8 +239,9 @@ class _TextList extends StatelessWidget {
     final p = pal(context);
     final prefs = Prefs.I;
     final headings = {for (final s in c.sections) s.start: s.title};
-    final style = serif(size: prefs.fontSize, height: 1.7, color: p.fg);
+    final style = readingStyle(readingFonts[prefs.readingFont], size: prefs.fontSize, height: prefs.lineHeight, color: p.fg);
     final marks = e.meta!.bookmarks.toSet();
+    final notes = e.meta!.notes;
     final bottom = 140 + MediaQuery.of(context).padding.bottom;
 
     return ScrollablePositionedList.builder(
@@ -273,7 +282,10 @@ class _TextList extends StatelessWidget {
                   Text(heading, style: serif(size: prefs.fontSize + 7, weight: FontWeight.w600, color: p.fg, height: 1.2)),
                 ]),
               ),
-            InkWell(
+            AnimatedOpacity(
+              duration: const Duration(milliseconds: 300),
+              opacity: prefs.focusMode && !current ? 0.28 : 1,
+              child: InkWell(
               borderRadius: BorderRadius.circular(14),
               onTap: () => onTap(i),
               onLongPress: () => onLongPress(i),
@@ -285,9 +297,13 @@ class _TextList extends StatelessWidget {
                 child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
                   Expanded(child: body),
                   if (marks.contains(i))
-                    Padding(padding: const EdgeInsets.only(left: 6, top: 6), child: Icon(Icons.bookmark_rounded, size: 18, color: p.accent)),
+                    Padding(
+                      padding: const EdgeInsets.only(left: 6, top: 6),
+                      child: Icon(notes['$i'] != null ? Icons.sticky_note_2_rounded : Icons.bookmark_rounded, size: 18, color: p.accent),
+                    ),
                 ]),
               ),
+            ),
             ),
           ]),
         );
@@ -394,16 +410,16 @@ class _MiniPlayer extends StatelessWidget {
                                 maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontWeight: FontWeight.w800, fontSize: 14, color: p.fg)),
                             const SizedBox(height: 2),
                             Text(
-                              '${(frac * 100).round()} % · faltan ${fmtMinutes(e.remainingMinutes)} · ${Prefs.I.speed.toStringAsFixed(Prefs.I.speed % 1 == 0 ? 0 : 2)}×',
+                              '${(frac * 100).round()} % · faltan ${fmtMinutes(e.remainingMinutes)} · ${speedLabel(Prefs.I.speed)}',
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
                               style: TextStyle(fontSize: 12, color: p.muted, fontFeatures: const [FontFeature.tabularFigures()]),
                             ),
                           ]),
                         ),
-                        IconButton(onPressed: e.prev, icon: const Icon(Icons.replay_rounded), tooltip: 'Párrafo anterior'),
+                        IconButton(onPressed: e.prevSentence, icon: const Icon(Icons.replay_rounded), tooltip: 'Frase anterior'),
                         _PlayButton(size: 50),
-                        IconButton(onPressed: e.next, icon: const Icon(Icons.forward_rounded), tooltip: 'Párrafo siguiente'),
+                        IconButton(onPressed: e.nextSentence, icon: const Icon(Icons.forward_rounded), tooltip: 'Frase siguiente'),
                       ]),
                     ),
                   ),

@@ -176,6 +176,15 @@ Palette pal(BuildContext c) => Theme.of(c).extension<Palette>()!;
 TextStyle serif({double size = 18, FontWeight weight = FontWeight.w400, Color? color, double? height}) =>
     GoogleFonts.literata(fontSize: size, fontWeight: weight, color: color, height: height);
 
+/// Letra del texto del libro (la elige el usuario).
+TextStyle readingStyle(String family, {double size = 19, double height = 1.7, Color? color, FontWeight weight = FontWeight.w400}) {
+  try {
+    return GoogleFonts.getFont(family, fontSize: size, height: height, color: color, fontWeight: weight);
+  } catch (_) {
+    return serif(size: size, height: height, color: color, weight: weight);
+  }
+}
+
 TextStyle label(Color color) =>
     TextStyle(fontSize: 11, letterSpacing: 1.2, fontWeight: FontWeight.w800, color: color);
 

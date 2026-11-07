@@ -1,7 +1,7 @@
 name: lector_libros
 description: Lector de libros en voz alta (PDF, EPUB, TXT) con traducción al español.
 publish_to: 'none'
-version: 3.0.0+3
+version: 4.0.0+4
 
 environment:
   sdk: '>=3.3.0 <4.0.0'
@@ -9,8 +9,9 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  # Voz
-  flutter_tts:
+  # Voz (motor propio, en packages/lector_tts)
+  lector_tts:
+    path: packages/lector_tts
   audio_service:
   # Libros
   file_picker: ^11.0.2

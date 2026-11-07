@@ -1,7 +1,10 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:lector_tts/lector_tts.dart';
 
 import '../prefs.dart';
 import '../reader_engine.dart';
+import '../stats.dart';
 import '../theme.dart';
 import '../translator.dart';
 
@@ -11,7 +14,7 @@ Future<void> _sheet(BuildContext context, WidgetBuilder builder, {bool tall = fa
     isScrollControlled: true,
     useSafeArea: true,
     builder: (c) => tall
-        ? FractionallySizedBox(heightFactor: 0.88, child: builder(c))
+        ? FractionallySizedBox(heightFactor: 0.9, child: builder(c))
         : SafeArea(child: Padding(padding: const EdgeInsets.fromLTRB(22, 0, 22, 22), child: builder(c))),
   );
 }
@@ -27,11 +30,24 @@ Widget _title(BuildContext c, String t, {String? sub}) => Padding(
       ]),
     );
 
+Widget _section(BuildContext c, String t) => Padding(
+      padding: const EdgeInsets.only(top: 20, bottom: 8),
+      child: Text(t, style: label(pal(c).muted)),
+    );
+
+String speedLabel(double s) {
+  final t = s.toStringAsFixed(2);
+  return '${t.endsWith('0') ? t.substring(0, t.length - 1) : t}×'.replaceAll('.', ',');
+}
+
 // ------------------------------------------------------------ reproducir
 
-Future<void> playOrAskVoice(BuildContext context) => ReaderEngine.I.toggle();
+Future<void> playOrAskVoice(BuildContext context) async {
+  HapticFeedback.selectionClick();
+  await ReaderEngine.I.toggle();
+}
 
-// ------------------------------------------------------------ voz
+// ------------------------------------------------------------ voces
 
 void showVoiceSheet(BuildContext context) {
   ReaderEngine.I.loadVoices();
@@ -49,57 +65,104 @@ class _VoiceSheet extends StatelessWidget {
       listenable: Listenable.merge([Prefs.I, e]),
       builder: (context, _) {
         final pr = Prefs.I;
-        final cur = e.currentVoice;
-        final dv = e.dialogueVoice;
-        final es = e.spanishVoices;
-        final hasGood = es.any((v) => ReaderEngine.quality(v) != 'Estándar');
-        return ListView(padding: const EdgeInsets.fromLTRB(22, 0, 22, 28), children: [
-          _title(context, 'Voz y lectura'),
-
-          // Diálogos
-          Text('DIÁLOGOS DE LOS PERSONAJES', style: label(p.muted)),
-          const SizedBox(height: 8),
+        final f = e.female, m = e.male;
+        final needsBetter = (f != null && f.quality < 2) || (m != null && m.quality < 2);
+        return ListView(padding: const EdgeInsets.fromLTRB(22, 0, 22, 32), children: [
+          _title(context, 'Voces', sub: 'Elegí quién narra y cómo suenan los personajes.'),
+          Row(children: [
+            Expanded(
+              child: _VoiceCard(
+                voice: f,
+                fallbackName: 'Mónica',
+                role: pr.narratorMale ? 'Personajes' : 'Narra',
+                selected: !pr.narratorMale,
+                speed: pr.speedFemale,
+                onSelect: () {
+                  pr.setNarratorMale(false);
+                  e.voicesChanged();
+                },
+                onSpeed: pr.setSpeedFemale,
+                onSpeedEnd: (_) => e.voicesChanged(),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: _VoiceCard(
+                voice: m,
+                fallbackName: 'Jorge',
+                role: pr.narratorMale ? 'Narra' : 'Personajes',
+                selected: pr.narratorMale,
+                speed: pr.speedMale,
+                onSelect: () {
+                  pr.setNarratorMale(true);
+                  e.voicesChanged();
+                },
+                onSpeed: pr.setSpeedMale,
+                onSpeedEnd: (_) => e.voicesChanged(),
+              ),
+            ),
+          ]),
+          if (needsBetter || f == null || m == null)
+            Container(
+              margin: const EdgeInsets.only(top: 14),
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(color: p.hl, borderRadius: BorderRadius.circular(16)),
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Row(children: [
+                  Icon(Icons.auto_awesome_rounded, color: p.accent, size: 20),
+                  const SizedBox(width: 8),
+                  const Expanded(child: Text('Hacelas sonar mucho más naturales', style: TextStyle(fontWeight: FontWeight.w800))),
+                ]),
+                const SizedBox(height: 6),
+                const Text(
+                  'En el iPhone: Ajustes › Accesibilidad › Leer y hablar (Read & Speak) › Voces › Español. '
+                  'Descargá «Mónica (Mejorada)» y «Jorge (Mejorada)». Si buscás «Voces» en Ajustes llegás más rápido. '
+                  'Después cerrá y abrí esta pantalla.',
+                  style: TextStyle(height: 1.45),
+                ),
+              ]),
+            ),
+          _section(context, 'DIÁLOGOS'),
+          _DialogueOption(
+            mode: DialogueMode.personajes,
+            title: 'Voces por personaje',
+            sub: 'Detecta si habla un hombre o una mujer («—dijo ella», «respondió el anciano») y usa Mónica o Jorge.',
+          ),
+          _DialogueOption(
+            mode: DialogueMode.otraVoz,
+            title: 'La otra voz lee los diálogos',
+            sub: 'Uno narra y el otro dice todo lo que hablan los personajes.',
+          ),
+          _DialogueOption(
+            mode: DialogueMode.tono,
+            title: 'Misma voz, otro tono',
+            sub: 'Los diálogos se leen un poco más agudo y pausado.',
+          ),
+          _DialogueOption(
+            mode: DialogueMode.igual,
+            title: 'Sin diferencia',
+            sub: 'Todo con la voz del narrador, con una pausa al cambiar.',
+          ),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            title: const Text('Interpretación', style: TextStyle(fontWeight: FontWeight.w700)),
+            subtitle: const Text('Si el texto dice que alguien susurra o grita, la voz lo acompaña.'),
+            value: pr.expressive,
+            onChanged: (v) {
+              pr.setExpressive(v);
+              e.voicesChanged();
+            },
+          ),
+          const SizedBox(height: 4),
           SizedBox(
             width: double.infinity,
-            child: SegmentedButton<DialogueMode>(
-              showSelectedIcon: false,
-              segments: const [
-                ButtonSegment(value: DialogueMode.igual, label: Text('Igual')),
-                ButtonSegment(value: DialogueMode.tono, label: Text('Otro tono')),
-                ButtonSegment(value: DialogueMode.otraVoz, label: Text('Otra voz')),
-              ],
-              selected: {pr.dialogueMode},
-              onSelectionChanged: (s) {
-                pr.setDialogueMode(s.first);
-                e.voicesChanged();
-              },
-            ),
-          ),
-          const SizedBox(height: 8),
-          Text(
-            switch (pr.dialogueMode) {
-              DialogueMode.igual => 'Narración y diálogos con la misma voz, con una pausa al cambiar.',
-              DialogueMode.tono => 'Lo que dicen los personajes se lee con un tono un poco más agudo y pausado, y con pausas antes y después.',
-              DialogueMode.otraVoz => dv == null
-                  ? 'Elegí abajo la voz de los diálogos (tocá «Diálogos» en una voz).'
-                  : 'Los diálogos los lee ${dv['name']}.',
-            },
-            style: TextStyle(color: p.muted, fontSize: 13, height: 1.4),
-          ),
-          const SizedBox(height: 8),
-          Align(
-            alignment: Alignment.centerLeft,
-            child: TextButton.icon(
+            child: OutlinedButton.icon(
               onPressed: e.previewDialogue,
-              icon: const Icon(Icons.play_circle_outline_rounded),
-              label: const Text('Escuchar un ejemplo'),
+              icon: const Icon(Icons.play_arrow_rounded),
+              label: const Text('Escuchar un ejemplo con diálogos'),
             ),
           ),
-          const SizedBox(height: 14),
-
-          // Pausas
-          Text('PAUSAS ENTRE FRASES', style: label(p.muted)),
-          const SizedBox(height: 8),
+          _section(context, 'PAUSAS ENTRE FRASES'),
           SizedBox(
             width: double.infinity,
             child: SegmentedButton<int>(
@@ -110,115 +173,210 @@ class _VoiceSheet extends StatelessWidget {
                 ButtonSegment(value: 2, label: Text('Largas')),
               ],
               selected: {pr.pauseLevel},
-              onSelectionChanged: (s) => pr.setPauseLevel(s.first),
+              onSelectionChanged: (s) {
+                pr.setPauseLevel(s.first);
+                e.voicesChanged();
+              },
             ),
           ),
-          const SizedBox(height: 22),
-
-          // Voces
-          Text('VOZ DEL NARRADOR', style: label(p.muted)),
           const SizedBox(height: 8),
-          if (!hasGood)
-            Container(
-              margin: const EdgeInsets.only(bottom: 10),
-              padding: const EdgeInsets.all(14),
-              decoration: BoxDecoration(color: p.hl, borderRadius: BorderRadius.circular(16)),
-              child: const Text(
-                'Para que Mónica suene mucho más clara, descargá su versión mejorada: en el iPhone andá a '
-                'Ajustes › Accesibilidad › Contenido leído › Voces › Español › España › Mónica, y bajá «Mónica (Mejorada)». '
-                'Después volvé acá.',
-                style: TextStyle(height: 1.45),
-              ),
-            ),
-          for (final v in es)
-            _VoiceTile(
-              v: v,
-              selected: cur != null && cur['name'] == v['name'] && cur['locale'] == v['locale'],
-              dialogue: pr.dialogueMode == DialogueMode.otraVoz && dv != null && dv['name'] == v['name'] && dv['locale'] == v['locale'],
-            ),
-          if (es.isEmpty) Text('No encontré voces en español en este iPhone.', style: TextStyle(color: p.muted)),
+          Text('Las pausas largas ayudan a entender mejor y a seguir el texto.', style: TextStyle(color: p.muted, fontSize: 13)),
         ]);
       },
     );
   }
 }
 
-class _VoiceTile extends StatelessWidget {
-  final Map<String, String> v;
-  final bool selected, dialogue;
-  const _VoiceTile({required this.v, required this.selected, required this.dialogue});
+class _VoiceCard extends StatelessWidget {
+  final NativeVoice? voice;
+  final String fallbackName, role;
+  final bool selected;
+  final double speed;
+  final VoidCallback onSelect;
+  final ValueChanged<double> onSpeed, onSpeedEnd;
 
-  String _region(String l) {
-    final x = l.toLowerCase().replaceAll('_', '-');
-    if (x == 'es-es') return 'España';
-    if (x == 'es-mx') return 'México';
-    if (x == 'es-ar') return 'Argentina';
-    if (x == 'es-us') return 'EE. UU.';
-    if (x == 'es-co') return 'Colombia';
-    if (x == 'es-cl') return 'Chile';
-    return l;
-  }
+  const _VoiceCard({
+    required this.voice,
+    required this.fallbackName,
+    required this.role,
+    required this.selected,
+    required this.speed,
+    required this.onSelect,
+    required this.onSpeed,
+    required this.onSpeedEnd,
+  });
 
   @override
   Widget build(BuildContext context) {
     final p = pal(context);
-    final e = ReaderEngine.I;
-    final q = ReaderEngine.quality(v);
-    return InkWell(
-      borderRadius: BorderRadius.circular(14),
-      onTap: () {
-        Prefs.I.setVoice(v['name']!, v['locale']!);
-        e.voicesChanged();
-        e.preview(v);
-      },
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 8),
-        child: Row(children: [
-          CircleAvatar(
-            radius: 21,
-            backgroundColor: selected ? p.accent : p.surface2,
-            child: Text((v['name'] ?? '?').substring(0, 1),
-                style: TextStyle(fontWeight: FontWeight.w800, color: selected ? p.onAccent : p.fg)),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Wrap(spacing: 6, runSpacing: 4, crossAxisAlignment: WrapCrossAlignment.center, children: [
-                Text(v['name'] ?? '', style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 15)),
-                if (selected) const _Badge('Narrador'),
-                if (dialogue) const _Badge('Diálogos'),
-              ]),
-              Text('${_region(v['locale'] ?? '')} · $q', style: TextStyle(color: p.muted, fontSize: 13)),
-            ]),
-          ),
-          if (Prefs.I.dialogueMode == DialogueMode.otraVoz)
-            TextButton(
-              onPressed: () {
-                Prefs.I.setDialogueVoice(v['name']!, v['locale']!);
-                e.voicesChanged();
-                e.preview(v, dialogue: true);
-              },
-              child: const Text('Diálogos'),
+    final v = voice;
+    return GestureDetector(
+      onTap: onSelect,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        padding: const EdgeInsets.fromLTRB(14, 14, 14, 6),
+        decoration: BoxDecoration(
+          color: selected ? p.hl : p.surface2,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: selected ? p.accent : Colors.transparent, width: 2),
+        ),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            CircleAvatar(
+              radius: 18,
+              backgroundColor: selected ? p.accent : p.surface,
+              child: Text((v?.name ?? fallbackName).substring(0, 1),
+                  style: TextStyle(fontWeight: FontWeight.w800, color: selected ? p.onAccent : p.fg)),
             ),
-          IconButton(tooltip: 'Escuchar', onPressed: () => e.preview(v), icon: const Icon(Icons.play_circle_outline_rounded)),
+            const Spacer(),
+            IconButton(
+              tooltip: 'Escuchar',
+              visualDensity: VisualDensity.compact,
+              onPressed: v == null ? null : () => ReaderEngine.I.preview(v),
+              icon: const Icon(Icons.play_circle_fill_rounded),
+              color: p.accent,
+            ),
+          ]),
+          const SizedBox(height: 8),
+          Text(v?.name ?? fallbackName, style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 17)),
+          Text(v == null ? 'No instalada' : '${v.qualityLabel} · $role',
+              style: TextStyle(color: p.muted, fontSize: 12.5, fontWeight: FontWeight.w600)),
+          const SizedBox(height: 6),
+          Row(children: [
+            Icon(Icons.speed_rounded, size: 16, color: p.muted),
+            const SizedBox(width: 4),
+            Text(speedLabel(speed), style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700, color: p.fg)),
+          ]),
+          SliderTheme(
+            data: SliderTheme.of(context).copyWith(trackHeight: 3, thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 7)),
+            child: Slider(
+              value: speed.clamp(0.7, 1.3).toDouble(),
+              min: 0.7,
+              max: 1.3,
+              divisions: 12,
+              onChanged: onSpeed,
+              onChangeEnd: onSpeedEnd,
+            ),
+          ),
         ]),
       ),
     );
   }
 }
 
-class _Badge extends StatelessWidget {
-  final String text;
-  const _Badge(this.text);
+class _DialogueOption extends StatelessWidget {
+  final DialogueMode mode;
+  final String title, sub;
+  const _DialogueOption({required this.mode, required this.title, required this.sub});
+
   @override
   Widget build(BuildContext context) {
     final p = pal(context);
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-      decoration: BoxDecoration(color: p.hl, borderRadius: BorderRadius.circular(20)),
-      child: Text(text, style: TextStyle(color: p.accent, fontSize: 11, fontWeight: FontWeight.w800)),
+    final sel = Prefs.I.dialogueMode == mode;
+    return InkWell(
+      borderRadius: BorderRadius.circular(14),
+      onTap: () {
+        Prefs.I.setDialogueMode(mode);
+        ReaderEngine.I.voicesChanged();
+      },
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 8),
+        child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Icon(sel ? Icons.radio_button_checked_rounded : Icons.radio_button_off_rounded, color: sel ? p.accent : p.muted),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(title, style: const TextStyle(fontWeight: FontWeight.w700)),
+              const SizedBox(height: 2),
+              Text(sub, style: TextStyle(color: p.muted, fontSize: 13, height: 1.35)),
+            ]),
+          ),
+        ]),
+      ),
     );
   }
+}
+
+// ------------------------------------------------------------ velocidad
+
+void showSpeedSheet(BuildContext context) {
+  const presets = [0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5];
+  _sheet(context, (c) {
+    return ListenableBuilder(
+      listenable: Prefs.I,
+      builder: (c, _) {
+        final s = Prefs.I.speed;
+        final p = pal(c);
+        return Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+          _title(c, 'Velocidad de lectura'),
+          Row(children: [
+            IconButton.filledTonal(
+              onPressed: s <= 0.5 ? null : () => ReaderEngine.I.setSpeed(double.parse((s - 0.05).toStringAsFixed(2))),
+              icon: const Icon(Icons.remove_rounded),
+            ),
+            Expanded(
+              child: Center(
+                child: Text(speedLabel(s), style: TextStyle(fontSize: 44, fontWeight: FontWeight.w800, color: p.accent)),
+              ),
+            ),
+            IconButton.filledTonal(
+              onPressed: s >= 2.0 ? null : () => ReaderEngine.I.setSpeed(double.parse((s + 0.05).toStringAsFixed(2))),
+              icon: const Icon(Icons.add_rounded),
+            ),
+          ]),
+          Slider(
+            value: s.clamp(0.5, 2.0).toDouble(),
+            min: 0.5,
+            max: 2.0,
+            divisions: 30,
+            onChanged: (v) => Prefs.I.setSpeed(double.parse(v.toStringAsFixed(2))),
+            onChangeEnd: (v) => ReaderEngine.I.setSpeed(double.parse(v.toStringAsFixed(2))),
+          ),
+          Wrap(spacing: 8, runSpacing: 8, children: [
+            for (final v in presets)
+              ChoiceChip(
+                label: Text(speedLabel(v)),
+                selected: (s - v).abs() < 0.01,
+                onSelected: (_) => ReaderEngine.I.setSpeed(v),
+              ),
+          ]),
+          const SizedBox(height: 12),
+          Text(
+            'Para entender bien, entre 0,8× y 0,9×. Cada voz tiene además su propio ajuste en «Voces».',
+            style: TextStyle(color: p.muted, height: 1.4),
+          ),
+        ]);
+      },
+    );
+  });
+}
+
+// ------------------------------------------------------------ temporizador
+
+void showSleepSheet(BuildContext context) {
+  final e = ReaderEngine.I;
+  _sheet(context, (c) {
+    void pick(VoidCallback f) {
+      f();
+      Navigator.pop(c);
+    }
+
+    return Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+      _title(c, 'Temporizador', sub: 'La lectura se pausa sola, ideal para escuchar antes de dormir.'),
+      Wrap(spacing: 8, runSpacing: 8, children: [
+        for (final m in [5, 10, 15, 30, 45, 60, 90]) ActionChip(label: Text('$m min'), onPressed: () => pick(() => e.setSleepMinutes(m))),
+        ActionChip(
+          avatar: const Icon(Icons.flag_outlined, size: 18),
+          label: const Text('Al terminar el capítulo'),
+          onPressed: () => pick(e.setSleepEndOfSection),
+        ),
+      ]),
+      if (e.sleepActive) ...[
+        const SizedBox(height: 16),
+        OutlinedButton.icon(onPressed: () => pick(e.clearSleep), icon: const Icon(Icons.close_rounded), label: const Text('Quitar temporizador')),
+      ],
+    ]);
+  });
 }
 
 // ------------------------------------------------------------ traducción
@@ -303,87 +461,47 @@ class _TranslateSheet extends StatelessWidget {
   }
 }
 
-// ------------------------------------------------------------ velocidad
-
-void showSpeedSheet(BuildContext context) {
-  const presets = [0.7, 0.8, 0.9, 1.0, 1.1, 1.25];
-  _sheet(context, (c) {
-    return ListenableBuilder(
-      listenable: Prefs.I,
-      builder: (c, _) {
-        final s = Prefs.I.speed;
-        return Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-          _title(c, 'Velocidad'),
-          Text('${s.toStringAsFixed(2)}×', style: TextStyle(fontSize: 40, fontWeight: FontWeight.w800, color: pal(c).accent)),
-          Slider(
-            value: s.clamp(0.6, 1.8).toDouble(),
-            min: 0.6,
-            max: 1.8,
-            divisions: 24,
-            onChanged: (v) => Prefs.I.setSpeed(double.parse(v.toStringAsFixed(2))),
-            onChangeEnd: (v) => ReaderEngine.I.setSpeed(double.parse(v.toStringAsFixed(2))),
-          ),
-          Wrap(spacing: 8, runSpacing: 8, children: [
-            for (final v in presets)
-              ChoiceChip(
-                label: Text('$v×'),
-                selected: (s - v).abs() < 0.01,
-                onSelected: (_) => ReaderEngine.I.setSpeed(v),
-              ),
-          ]),
-          const SizedBox(height: 12),
-          Text('Para entender mejor, probá entre 0,8× y 0,9×. Para repasar algo que ya conocés, 1,1× o más.', style: TextStyle(color: pal(c).muted, height: 1.4)),
-        ]);
-      },
-    );
-  });
-}
-
-// ------------------------------------------------------------ temporizador
-
-void showSleepSheet(BuildContext context) {
-  final e = ReaderEngine.I;
-  _sheet(context, (c) {
-    void pick(VoidCallback f) {
-      f();
-      Navigator.pop(c);
-    }
-
-    return Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-      _title(c, 'Temporizador', sub: 'La lectura se pausa sola.'),
-      Wrap(spacing: 8, runSpacing: 8, children: [
-        for (final m in [10, 15, 30, 45, 60, 90]) ActionChip(label: Text('$m min'), onPressed: () => pick(() => e.setSleepMinutes(m))),
-        ActionChip(
-          avatar: const Icon(Icons.flag_outlined, size: 18),
-          label: const Text('Al terminar el capítulo'),
-          onPressed: () => pick(e.setSleepEndOfSection),
-        ),
-      ]),
-      if (e.sleepActive) ...[
-        const SizedBox(height: 16),
-        OutlinedButton.icon(onPressed: () => pick(e.clearSleep), icon: const Icon(Icons.close_rounded), label: const Text('Quitar temporizador')),
-      ],
-    ]);
-  });
-}
-
 // ------------------------------------------------------------ apariencia
 
 void showDisplaySheet(BuildContext context) {
-  _sheet(context, (c) {
+  _sheet(context, tall: true, (c) {
     return ListenableBuilder(
       listenable: Prefs.I,
       builder: (c, _) {
         final pr = Prefs.I;
         final p = pal(c);
-        return Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+        return ListView(padding: const EdgeInsets.fromLTRB(22, 0, 22, 28), children: [
           _title(c, 'Texto y tema'),
+          Container(
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(color: p.surface2, borderRadius: BorderRadius.circular(16)),
+            child: Text(
+              'Ella se acercó a la ventana y miró la lluvia. —¿Vamos a llegar a tiempo? —preguntó.',
+              style: readingStyle(readingFonts[pr.readingFont], size: pr.fontSize, height: pr.lineHeight, color: p.fg),
+            ),
+          ),
+          _section(c, 'TAMAÑO'),
           Row(children: [
             Text('A', style: serif(size: 15, color: p.fg)),
             Expanded(child: Slider(value: pr.fontSize, min: 14, max: 30, divisions: 16, onChanged: pr.setFontSize)),
             Text('A', style: serif(size: 28, color: p.fg)),
           ]),
-          const SizedBox(height: 8),
+          _section(c, 'INTERLINEADO'),
+          Row(children: [
+            Icon(Icons.density_small_rounded, color: p.muted),
+            Expanded(child: Slider(value: pr.lineHeight, min: 1.4, max: 2.2, divisions: 8, onChanged: pr.setLineHeight)),
+            Icon(Icons.density_large_rounded, color: p.muted),
+          ]),
+          _section(c, 'LETRA'),
+          Wrap(spacing: 8, runSpacing: 8, children: [
+            for (var i = 0; i < readingFonts.length; i++)
+              ChoiceChip(
+                label: Text(readingFontNames[i], style: readingStyle(readingFonts[i], size: 15, height: 1.2, color: p.fg)),
+                selected: pr.readingFont == i,
+                onSelected: (_) => pr.setReadingFont(i),
+              ),
+          ]),
+          _section(c, 'TEMA'),
           Row(children: [
             for (final t in AppTheme.values)
               Expanded(
@@ -394,6 +512,13 @@ void showDisplaySheet(BuildContext context) {
               ),
           ]),
           const SizedBox(height: 8),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            title: const Text('Modo enfoque'),
+            subtitle: const Text('Atenúa todo menos el párrafo que se está leyendo.'),
+            value: pr.focusMode,
+            onChanged: pr.setFocusMode,
+          ),
           SwitchListTile(
             contentPadding: EdgeInsets.zero,
             title: const Text('Seguir el texto mientras escucho'),
@@ -430,11 +555,129 @@ class _ThemeSwatch extends StatelessWidget {
         alignment: Alignment.center,
         child: Column(mainAxisSize: MainAxisSize.min, children: [
           Text('Aa', style: serif(size: 20, weight: FontWeight.w600, color: theme == AppTheme.auto ? a.accent : a.fg)),
-          Text(themeNames[theme]!, style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700, color: theme == AppTheme.auto ? a.accent : a.muted)),
+          Text(themeNames[theme]!,
+              style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700, color: theme == AppTheme.auto ? a.accent : a.muted)),
         ]),
       ),
     );
   }
+}
+
+// ------------------------------------------------------------ estadísticas
+
+void showStatsSheet(BuildContext context) {
+  _sheet(context, (c) => const _StatsSheet());
+}
+
+class _StatsSheet extends StatelessWidget {
+  const _StatsSheet();
+
+  @override
+  Widget build(BuildContext context) {
+    final p = pal(context);
+    return ListenableBuilder(
+      listenable: Listenable.merge([Stats.I, Prefs.I]),
+      builder: (context, _) {
+        final st = Stats.I;
+        final goal = Prefs.I.dailyGoal;
+        final week = st.lastWeek;
+        final maxV = week.fold<int>(goal, (a, b) => b > a ? b : a).toDouble();
+        const days = ['L', 'M', 'M', 'J', 'V', 'S', 'D'];
+        final now = DateTime.now();
+        return Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+          _title(context, 'Tu escucha'),
+          Row(children: [
+            _StatBox(value: '${st.todayMinutes}', unit: 'min hoy'),
+            const SizedBox(width: 10),
+            _StatBox(value: '${st.streak}', unit: st.streak == 1 ? 'día seguido' : 'días seguidos'),
+            const SizedBox(width: 10),
+            _StatBox(value: '${st.finishedBooks}', unit: st.finishedBooks == 1 ? 'libro terminado' : 'libros terminados'),
+          ]),
+          _section(context, 'ÚLTIMOS 7 DÍAS'),
+          SizedBox(
+            height: 140,
+            child: Row(crossAxisAlignment: CrossAxisAlignment.end, children: [
+              for (var i = 0; i < 7; i++)
+                Expanded(
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 5),
+                    child: Column(mainAxisAlignment: MainAxisAlignment.end, children: [
+                      Text('${week[i]}',
+                          style: TextStyle(fontSize: 11, color: p.muted, fontFeatures: const [FontFeature.tabularFigures()])),
+                      const SizedBox(height: 4),
+                      Container(
+                        height: 4 + 96 * (maxV == 0 ? 0 : week[i] / maxV),
+                        decoration: BoxDecoration(
+                          color: week[i] >= goal ? p.accent : p.accent.withValues(alpha: 0.35),
+                          borderRadius: BorderRadius.circular(6),
+                        ),
+                      ),
+                      const SizedBox(height: 6),
+                      Text(days[now.subtract(Duration(days: 6 - i)).weekday - 1],
+                          style: TextStyle(fontSize: 12, fontWeight: i == 6 ? FontWeight.w800 : FontWeight.w500, color: p.fg)),
+                    ]),
+                  ),
+                ),
+            ]),
+          ),
+          _section(context, 'META DIARIA'),
+          Wrap(spacing: 8, runSpacing: 8, children: [
+            for (final g in [10, 20, 30, 45, 60])
+              ChoiceChip(label: Text('$g min'), selected: goal == g, onSelected: (_) => Prefs.I.setDailyGoal(g)),
+          ]),
+          const SizedBox(height: 12),
+          Text('En total escuchaste ${fmtMinutes(st.totalMinutes)}.', style: TextStyle(color: p.muted)),
+        ]);
+      },
+    );
+  }
+}
+
+class _StatBox extends StatelessWidget {
+  final String value, unit;
+  const _StatBox({required this.value, required this.unit});
+
+  @override
+  Widget build(BuildContext context) {
+    final p = pal(context);
+    return Expanded(
+      child: Container(
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(color: p.surface2, borderRadius: BorderRadius.circular(16)),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text(value, style: TextStyle(fontSize: 26, fontWeight: FontWeight.w800, color: p.fg)),
+          Text(unit, style: TextStyle(fontSize: 12, color: p.muted, fontWeight: FontWeight.w600)),
+        ]),
+      ),
+    );
+  }
+}
+
+// ------------------------------------------------------------ notas
+
+Future<void> showNoteDialog(BuildContext context, int para) async {
+  final e = ReaderEngine.I;
+  final ctrl = TextEditingController(text: e.meta?.notes['$para'] ?? '');
+  final result = await showDialog<String>(
+    context: context,
+    builder: (c) => AlertDialog(
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+      title: const Text('Nota'),
+      content: TextField(
+        controller: ctrl,
+        autofocus: true,
+        maxLines: 5,
+        minLines: 3,
+        textCapitalization: TextCapitalization.sentences,
+        decoration: const InputDecoration(hintText: 'Escribí lo que quieras recordar de esta parte'),
+      ),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(c), child: const Text('Cancelar')),
+        FilledButton(onPressed: () => Navigator.pop(c, ctrl.text), child: const Text('Guardar')),
+      ],
+    ),
+  );
+  if (result != null) e.setNote(para, result);
 }
 
 // ------------------------------------------------------------ buscar
@@ -526,7 +769,7 @@ class _SearchBodyState extends State<_SearchBody> {
   }
 }
 
-// ------------------------------------------------------------ marcadores
+// ------------------------------------------------------------ marcadores y notas
 
 void showBookmarksSheet(BuildContext context, {required void Function(int) onPick}) {
   final e = ReaderEngine.I;
@@ -535,12 +778,32 @@ void showBookmarksSheet(BuildContext context, {required void Function(int) onPic
     return ListenableBuilder(
       listenable: e,
       builder: (c, _) {
-        final marks = e.meta!.bookmarks;
+        final m = e.meta!;
+        final marks = m.bookmarks;
         final content = e.content!;
         return ListView(padding: const EdgeInsets.fromLTRB(22, 0, 22, 24), children: [
-          _title(c, 'Marcadores'),
+          Row(children: [
+            Expanded(child: _title(c, 'Marcadores y notas')),
+            if (m.notes.isNotEmpty)
+              TextButton.icon(
+                onPressed: () {
+                  final b = StringBuffer('${m.title}\n\n');
+                  for (final i in marks) {
+                    final n = m.notes['$i'];
+                    if (n == null) continue;
+                    b.writeln('• ${content.sections[content.sectionOf(i)].title}');
+                    b.writeln('  «${e.textAt(i)}»');
+                    b.writeln('  Nota: $n\n');
+                  }
+                  Clipboard.setData(ClipboardData(text: b.toString()));
+                  ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Notas copiadas')));
+                },
+                icon: const Icon(Icons.copy_rounded, size: 18),
+                label: const Text('Copiar notas'),
+              ),
+          ]),
           if (marks.isEmpty)
-            Text('Mantené apretado un párrafo y elegí «Agregar marcador» para guardarlo acá.', style: TextStyle(color: p.muted, height: 1.45)),
+            Text('Mantené apretado un párrafo para agregar un marcador o una nota.', style: TextStyle(color: p.muted, height: 1.45)),
           for (final i in marks)
             Dismissible(
               key: ValueKey(i),
@@ -552,15 +815,39 @@ void showBookmarksSheet(BuildContext context, {required void Function(int) onPic
                 child: Icon(Icons.delete_outline_rounded, color: p.accent),
               ),
               onDismissed: (_) => e.toggleBookmark(i),
-              child: ListTile(
-                contentPadding: EdgeInsets.zero,
-                leading: Icon(Icons.bookmark_rounded, color: p.accent),
-                title: Text(e.textAt(i), maxLines: 2, overflow: TextOverflow.ellipsis, style: serif(size: 15, color: p.fg)),
-                subtitle: Text(content.sections[content.sectionOf(i)].title, maxLines: 1, overflow: TextOverflow.ellipsis),
+              child: InkWell(
                 onTap: () {
                   Navigator.pop(c);
                   onPick(i);
                 },
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 10),
+                  child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Icon(m.notes['$i'] != null ? Icons.sticky_note_2_rounded : Icons.bookmark_rounded, color: p.accent),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                        Text(content.sections[content.sectionOf(i)].title,
+                            maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(color: p.muted, fontSize: 12.5)),
+                        const SizedBox(height: 2),
+                        Text(e.textAt(i), maxLines: 2, overflow: TextOverflow.ellipsis, style: serif(size: 15, color: p.fg)),
+                        if (m.notes['$i'] != null) ...[
+                          const SizedBox(height: 6),
+                          Container(
+                            padding: const EdgeInsets.all(10),
+                            decoration: BoxDecoration(color: p.hl, borderRadius: BorderRadius.circular(12)),
+                            child: Text(m.notes['$i']!, style: const TextStyle(height: 1.35)),
+                          ),
+                        ],
+                      ]),
+                    ),
+                    IconButton(
+                      tooltip: 'Editar nota',
+                      onPressed: () => showNoteDialog(context, i),
+                      icon: const Icon(Icons.edit_note_rounded),
+                    ),
+                  ]),
+                ),
               ),
             ),
         ]);

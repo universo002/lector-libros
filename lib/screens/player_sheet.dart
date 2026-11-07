@@ -153,8 +153,8 @@ class _PlayerSheetState extends State<_PlayerSheet> {
                         icon: const Icon(Icons.skip_previous_rounded, color: fg, size: 34),
                       ),
                       IconButton(
-                        tooltip: 'Párrafo anterior',
-                        onPressed: e.prev,
+                        tooltip: 'Frase anterior',
+                        onPressed: e.prevSentence,
                         icon: const Icon(Icons.replay_rounded, color: fg, size: 32),
                       ),
                       SizedBox(
@@ -175,8 +175,8 @@ class _PlayerSheetState extends State<_PlayerSheet> {
                         ),
                       ),
                       IconButton(
-                        tooltip: 'Párrafo siguiente',
-                        onPressed: e.next,
+                        tooltip: 'Frase siguiente',
+                        onPressed: e.nextSentence,
                         icon: const Icon(Icons.forward_rounded, color: fg, size: 32),
                       ),
                       IconButton(
@@ -189,8 +189,13 @@ class _PlayerSheetState extends State<_PlayerSheet> {
                     Wrap(alignment: WrapAlignment.center, spacing: 10, runSpacing: 10, children: [
                       _GlassPill(
                         icon: Icons.speed_rounded,
-                        text: '${Prefs.I.speed.toStringAsFixed(Prefs.I.speed % 1 == 0 ? 1 : 2)}×',
+                        text: speedLabel(Prefs.I.speed),
                         onTap: () => showSpeedSheet(context),
+                      ),
+                      _GlassPill(
+                        icon: Icons.replay_rounded,
+                        text: 'Repetir frase',
+                        onTap: e.repeatSentence,
                       ),
                       _GlassPill(
                         icon: Icons.record_voice_over_outlined,

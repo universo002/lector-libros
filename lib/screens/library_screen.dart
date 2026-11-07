@@ -9,6 +9,8 @@ import '../covers.dart';
 import '../importer.dart';
 import '../library.dart';
 import '../models.dart';
+import '../prefs.dart';
+import '../stats.dart';
 import '../reader_engine.dart';
 import '../theme.dart';
 import '../widgets/book_cover.dart';
@@ -119,20 +121,38 @@ class _LibraryScreenState extends State<LibraryScreen> {
         label: const Text('Agregar libro', style: TextStyle(fontWeight: FontWeight.w700)),
       ),
       body: ListenableBuilder(
-        listenable: Listenable.merge([Library.I, ReaderEngine.I]),
+        listenable: Listenable.merge([Library.I, ReaderEngine.I, Prefs.I, Stats.I]),
         builder: (context, _) {
-          final books = Library.I.books;
+          final all = Library.I.books;
           final e = ReaderEngine.I;
+          final pr = Prefs.I;
+          final books = all.where((b) {
+            switch (pr.filter) {
+              case LibraryFilter.todos:
+                return true;
+              case LibraryFilter.escuchando:
+                return b.position > 0 && !b.finished;
+              case LibraryFilter.sinEmpezar:
+                return b.position == 0;
+              case LibraryFilter.terminados:
+                return b.finished;
+            }
+          }).toList();
+          if (pr.sort == LibrarySort.titulo) {
+            books.sort((a, b) => a.title.toLowerCase().compareTo(b.title.toLowerCase()));
+          } else if (pr.sort == LibrarySort.progreso) {
+            books.sort((a, b) => b.progress.compareTo(a.progress));
+          }
           BookMeta? cont = e.meta;
           if (cont == null) {
-            for (final b in books) {
-              if (b.position > 0) {
+            for (final b in all) {
+              if (b.position > 0 && !b.finished) {
                 cont = b;
                 break;
               }
             }
           }
-          final totalMin = books.fold<int>(0, (a, b) => a + (b.chars * (1 - b.progress) / 950).round());
+          final totalMin = all.fold<int>(0, (a, b) => a + (b.chars * (1 - b.progress) / 950).round());
           return SafeArea(
             bottom: false,
             child: CustomScrollView(slivers: [
@@ -146,9 +166,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
                             style: TextStyle(fontSize: 34, fontWeight: FontWeight.w800, letterSpacing: -1.0, color: p.fg)),
                         const SizedBox(height: 2),
                         Text(
-                          books.isEmpty
+                          all.isEmpty
                               ? 'Tus libros, para escuchar'
-                              : '${books.length} ${books.length == 1 ? 'libro' : 'libros'} · ${fmtMinutes(totalMin)} por escuchar',
+                              : '${all.length} ${all.length == 1 ? 'libro' : 'libros'} · ${fmtMinutes(totalMin)} por escuchar',
                           style: TextStyle(color: p.muted, fontWeight: FontWeight.w600),
                         ),
                       ]),
@@ -161,21 +181,64 @@ class _LibraryScreenState extends State<LibraryScreen> {
                   ]),
                 ),
               ),
+              SliverToBoxAdapter(child: _StatsStrip(onTap: () => showStatsSheet(context))),
               if (cont != null) SliverToBoxAdapter(child: _ContinueCard(meta: cont, onOpen: () => _open(cont!))),
               if (_progress != null) SliverToBoxAdapter(child: _ImportCard(name: _importName ?? '', progress: _progress!, label: _label)),
               if (_error != null)
                 SliverToBoxAdapter(
                   child: _Notice(text: _error!, onClose: () => setState(() => _error = null)),
                 ),
-              if (books.isEmpty && _progress == null)
+              if (all.isEmpty && _progress == null)
                 SliverFillRemaining(hasScrollBody: false, child: _Empty(onAdd: _add))
               else ...[
                 SliverToBoxAdapter(
                   child: Padding(
-                    padding: const EdgeInsets.fromLTRB(20, 18, 20, 12),
-                    child: Text('TUS LIBROS', style: label(p.muted)),
+                    padding: const EdgeInsets.fromLTRB(20, 18, 8, 4),
+                    child: Row(children: [
+                      Expanded(child: Text('TUS LIBROS', style: label(p.muted))),
+                      PopupMenuButton<LibrarySort>(
+                        tooltip: 'Ordenar',
+                        initialValue: pr.sort,
+                        onSelected: pr.setSort,
+                        icon: Icon(Icons.sort_rounded, color: p.muted),
+                        itemBuilder: (_) => const [
+                          PopupMenuItem(value: LibrarySort.recientes, child: Text('Recientes')),
+                          PopupMenuItem(value: LibrarySort.titulo, child: Text('Título (A-Z)')),
+                          PopupMenuItem(value: LibrarySort.progreso, child: Text('Progreso')),
+                        ],
+                      ),
+                    ]),
                   ),
                 ),
+                SliverToBoxAdapter(
+                  child: SingleChildScrollView(
+                    scrollDirection: Axis.horizontal,
+                    padding: const EdgeInsets.fromLTRB(16, 0, 16, 14),
+                    child: Row(children: [
+                      for (final f in LibraryFilter.values)
+                        Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 4),
+                          child: ChoiceChip(
+                            label: Text(const {
+                              LibraryFilter.todos: 'Todos',
+                              LibraryFilter.escuchando: 'Escuchando',
+                              LibraryFilter.sinEmpezar: 'Sin empezar',
+                              LibraryFilter.terminados: 'Terminados',
+                            }[f]!),
+                            selected: pr.filter == f,
+                            onSelected: (_) => pr.setFilter(f),
+                          ),
+                        ),
+                    ]),
+                  ),
+                ),
+                if (books.isEmpty)
+                  SliverToBoxAdapter(
+                    child: Padding(
+                      padding: const EdgeInsets.fromLTRB(20, 20, 20, 120),
+                      child: Text('No hay libros en esta lista.', style: TextStyle(color: p.muted)),
+                    ),
+                  ),
                 SliverPadding(
                   padding: const EdgeInsets.fromLTRB(20, 0, 20, 110),
                   sliver: SliverGrid(
@@ -195,6 +258,57 @@ class _LibraryScreenState extends State<LibraryScreen> {
             ]),
           );
         },
+      ),
+    );
+  }
+}
+
+// ------------------------------------------------------------ meta del día
+
+class _StatsStrip extends StatelessWidget {
+  final VoidCallback onTap;
+  const _StatsStrip({required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    final p = pal(context);
+    final st = Stats.I;
+    final goal = Prefs.I.dailyGoal;
+    final today = st.todayMinutes;
+    final frac = goal == 0 ? 0.0 : (today / goal).clamp(0.0, 1.0).toDouble();
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+      child: Material(
+        color: p.surface,
+        borderRadius: BorderRadius.circular(20),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(20),
+          onTap: onTap,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+            child: Row(children: [
+              SizedBox(
+                width: 40,
+                height: 40,
+                child: Stack(alignment: Alignment.center, children: [
+                  CircularProgressIndicator(value: frac, strokeWidth: 4, color: p.accent, backgroundColor: p.line),
+                  Icon(frac >= 1 ? Icons.check_rounded : Icons.headphones_rounded, size: 18, color: p.accent),
+                ]),
+              ),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text(frac >= 1 ? '¡Meta de hoy cumplida!' : 'Hoy: $today de $goal min',
+                      style: TextStyle(fontWeight: FontWeight.w800, color: p.fg)),
+                  Text('Tocá para ver tus estadísticas', style: TextStyle(color: p.muted, fontSize: 12.5)),
+                ]),
+              ),
+              Icon(Icons.local_fire_department_rounded, color: st.streak > 0 ? p.accent : p.line),
+              const SizedBox(width: 2),
+              Text('${st.streak}', style: TextStyle(fontWeight: FontWeight.w800, color: p.fg)),
+            ]),
+          ),
+        ),
       ),
     );
   }
@@ -366,7 +480,7 @@ class _BookTile extends StatelessWidget {
             maxLines: 2, overflow: TextOverflow.ellipsis, style: TextStyle(fontWeight: FontWeight.w700, fontSize: 14, height: 1.25, color: p.fg)),
         const SizedBox(height: 2),
         Text(
-          pct == 0 ? (meta.author.isNotEmpty ? meta.author : 'Sin empezar') : '$pct % escuchado',
+          meta.finished ? 'Terminado' : (pct == 0 ? (meta.author.isNotEmpty ? meta.author : 'Sin empezar') : '$pct % escuchado'),
           maxLines: 1,
           overflow: TextOverflow.ellipsis,
           style: TextStyle(color: p.muted, fontSize: 12.5, fontWeight: FontWeight.w600),

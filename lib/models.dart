@@ -62,6 +62,7 @@ class BookMeta {
   bool useTranslation;
   bool hasCover;
   List<int> bookmarks;
+  Map<String, String> notes; // párrafo -> nota
   DateTime added;
   DateTime opened;
 
@@ -80,15 +81,18 @@ class BookMeta {
     this.useTranslation = false,
     this.hasCover = false,
     List<int>? bookmarks,
+    Map<String, String>? notes,
     DateTime? added,
     DateTime? opened,
   })  : bookmarks = bookmarks ?? [],
+        notes = notes ?? {},
         added = added ?? DateTime.now(),
         opened = opened ?? DateTime.now();
 
   double get progress => paraCount <= 1 ? 0 : position / (paraCount - 1);
   bool get isEnglish => lang == 'en';
   bool get fullyTranslated => translated >= paraCount;
+  bool get finished => paraCount > 0 && position >= paraCount - 1;
 
   Map<String, dynamic> toJson() => {
         'id': id,
@@ -105,6 +109,7 @@ class BookMeta {
         'useTranslation': useTranslation,
         'hasCover': hasCover,
         'bookmarks': bookmarks,
+        'notes': notes,
         'added': added.toIso8601String(),
         'opened': opened.toIso8601String(),
       };
@@ -124,6 +129,7 @@ class BookMeta {
         useTranslation: (m['useTranslation'] ?? false) as bool,
         hasCover: (m['hasCover'] ?? false) as bool,
         bookmarks: ((m['bookmarks'] ?? []) as List).map((e) => (e as num).toInt()).toList(),
+        notes: ((m['notes'] ?? {}) as Map).map((k, v) => MapEntry(k.toString(), v.toString())),
         added: DateTime.tryParse((m['added'] ?? '') as String),
         opened: DateTime.tryParse((m['opened'] ?? '') as String),
       );

@@ -8,11 +8,13 @@ import 'library.dart';
 import 'prefs.dart';
 import 'reader_engine.dart';
 import 'screens/library_screen.dart';
+import 'stats.dart';
 import 'theme.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Prefs.I.load();
+  await Stats.I.load();
   await Library.I.init();
   await _cleanOldVoices();
   await ReaderEngine.I.init();

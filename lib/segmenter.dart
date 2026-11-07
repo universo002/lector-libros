@@ -191,3 +191,90 @@ String speechText(String s, {bool spanish = true}) {
   if (t.isNotEmpty && !_endPunct.hasMatch(t)) t = '$t.';
   return t;
 }
+
+// ------------------------------------------------------------ quién habla y cómo
+
+/// Pista sobre el diálogo de un párrafo: quién habla (0 no se sabe, 1 hombre, 2 mujer)
+/// y en qué tono (0 normal, 1 susurro, 2 grito).
+class Cue {
+  final int gender;
+  final int tone;
+  const Cue(this.gender, this.tone);
+}
+
+const _verbsEs =
+    'dijo|respondió|preguntó|contestó|exclamó|susurró|gritó|murmuró|añadió|replicó|insistió|agregó|explicó|comentó|'
+    'suspiró|repitió|interrumpió|admitió|confesó|afirmó|protestó|ordenó|pidió|bromeó|musitó|balbuceó|declaró|anunció|'
+    'advirtió|aseguró|continuó|prosiguió|concluyó|sollozó|chilló|bramó|rugió|masculló|terció|inquirió|rió|sonrió|'
+    'opinó|propuso|sugirió|corrigió|negó|aclaró|reconoció|observó|apuntó|señaló|gruñó|jadeó|tartamudeó';
+const _verbsEn =
+    'said|asked|replied|answered|whispered|shouted|yelled|cried|muttered|added|called|snapped|murmured|exclaimed|'
+    'continued|sighed|laughed|told|demanded|insisted|growled|hissed|screamed|admitted|explained|agreed|offered';
+
+final _afterEs = RegExp('(?:$_verbsEs)\\s+(él|ella|el\\s+[a-záéíóúñ]+|la\\s+[a-záéíóúñ]+|un\\s+[a-záéíóúñ]+|una\\s+[a-záéíóúñ]+|[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)');
+final _beforeEs = RegExp('(?:^|\\s)(él|ella|Él|Ella)\\s+(?:$_verbsEs)');
+final _afterEn = RegExp('(?:$_verbsEn)\\s+(she|he|the\\s+[a-z]+|[A-Z][a-z]+)');
+final _beforeEn = RegExp('(?:^|\\s)(she|he|She|He)\\s+(?:$_verbsEn)');
+
+final _whisper = RegExp(r'susurr|murmur|musit|mascull|en voz baja|whisper|murmur|mutter|under (her|his) breath', caseSensitive: false);
+final _shout = RegExp(r'grit|exclam|chill|bram|rugi|vocifer|aull|shout|yell|scream|exclaim|roar', caseSensitive: false);
+
+const _femaleWords = {
+  'mujer', 'chica', 'niña', 'señora', 'señorita', 'madre', 'mamá', 'abuela', 'hermana', 'hija', 'reina', 'princesa',
+  'anciana', 'joven', 'muchacha', 'esposa', 'tía', 'doctora', 'maestra', 'profesora', 'amiga', 'dama', 'bruja',
+  'woman', 'girl', 'lady', 'mother', 'queen', 'princess', 'sister', 'daughter', 'wife', 'aunt', 'witch', 'old woman',
+};
+const _maleWords = {
+  'hombre', 'chico', 'niño', 'señor', 'padre', 'papá', 'abuelo', 'hermano', 'hijo', 'rey', 'príncipe', 'anciano',
+  'muchacho', 'esposo', 'marido', 'tío', 'doctor', 'maestro', 'profesor', 'amigo', 'caballero', 'mago', 'capitán',
+  'man', 'boy', 'gentleman', 'father', 'king', 'prince', 'brother', 'son', 'husband', 'uncle', 'wizard', 'captain',
+};
+
+int _genderOf(String who) {
+  final w = who.trim();
+  final lw = w.toLowerCase();
+  if (lw == 'ella' || lw == 'she') return 2;
+  if (lw == 'él' || lw == 'he') return 1;
+  final parts = lw.split(RegExp(r'\s+'));
+  if (parts.length == 2) {
+    final art = parts[0], noun = parts[1];
+    if (art == 'la' || art == 'una') return 2;
+    if (art == 'el' || art == 'un') {
+      // «el joven», «el doctor»: usamos el sustantivo si lo conocemos.
+      if (_femaleWords.contains(noun)) return 2;
+      return 1;
+    }
+    if (art == 'the') {
+      if (_femaleWords.contains(noun)) return 2;
+      if (_maleWords.contains(noun)) return 1;
+      return 0;
+    }
+  }
+  // Un nombre propio: en español, los que terminan en «a» suelen ser de mujer y en «o» de hombre.
+  if (w.isNotEmpty && w[0].toUpperCase() == w[0] && w[0].toLowerCase() != w[0]) {
+    if (lw.endsWith('a')) return 2;
+    if (lw.endsWith('o') || lw.endsWith('os')) return 1;
+  }
+  return 0;
+}
+
+/// Busca en la narración del párrafo quién habla y cómo (por ejemplo «—dijo ella en voz baja»).
+Cue paragraphCue(List<Seg> segs) {
+  if (!segs.any((s) => s.dialogue)) return const Cue(0, 0);
+  final narr = segs.where((s) => !s.dialogue).map((s) => s.speak).join(' ');
+  var gender = 0;
+  for (final rx in [_afterEs, _beforeEs, _afterEn, _beforeEn]) {
+    final m = rx.firstMatch(narr);
+    if (m != null) {
+      gender = _genderOf(m.group(1)!);
+      if (gender != 0) break;
+    }
+  }
+  var tone = 0;
+  if (_whisper.hasMatch(narr)) {
+    tone = 1;
+  } else if (_shout.hasMatch(narr)) {
+    tone = 2;
+  }
+  return Cue(gender, tone);
+}

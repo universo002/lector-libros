@@ -1,14 +1,14 @@
 import 'dart:async';
-import 'dart:io';
 
 import 'package:audio_service/audio_service.dart';
-import 'package:flutter/widgets.dart';
-import 'package:flutter_tts/flutter_tts.dart';
+import 'package:flutter/foundation.dart';
+import 'package:lector_tts/lector_tts.dart';
 
 import 'library.dart';
 import 'models.dart';
 import 'prefs.dart';
 import 'segmenter.dart';
+import 'stats.dart';
 import 'translator.dart';
 
 /// Parte del texto que se está leyendo (para resaltarla).
@@ -17,15 +17,48 @@ class HL {
   const HL(this.para, this.start, this.end);
 }
 
-/// Motor de lectura con las voces del iPhone.
-///
-/// Lee frase por frase: así el resaltado va exactamente con lo que se escucha,
-/// el ritmo es parejo y se pueden hacer pausas y cambiar el tono en los diálogos.
-class ReaderEngine extends ChangeNotifier with WidgetsBindingObserver {
+class _Utt {
+  final int id, para, seg, start, end;
+  final bool lastOfPara, lastOfBook;
+  const _Utt(this.id, this.para, this.seg, this.start, this.end, this.lastOfPara, this.lastOfBook);
+}
+
+const _novelty = {
+  'albert', 'bad news', 'bahh', 'bells', 'boing', 'bubbles', 'cellos', 'good news', 'jester', 'organ', 'superstar',
+  'trinoids', 'whisper', 'wobble', 'zarvox', 'eddy', 'flo', 'grandma', 'grandpa', 'reed', 'rocko', 'sandy', 'shelley',
+  'fred', 'junior', 'ralph', 'kathy',
+};
+
+String _norm(String s) => s
+    .toLowerCase()
+    .replaceAll('á', 'a')
+    .replaceAll('é', 'e')
+    .replaceAll('í', 'i')
+    .replaceAll('ó', 'o')
+    .replaceAll('ú', 'u');
+
+/// Junta frases muy cortas seguidas del mismo tipo: la voz suena más fluida.
+List<Seg> mergedSegments(String text) {
+  final raw = segmentText(text);
+  final out = <Seg>[];
+  for (final s in raw) {
+    if (out.isNotEmpty) {
+      final p = out.last;
+      if (p.dialogue == s.dialogue && p.speak.length < 70 && p.speak.length + s.speak.length < 230) {
+        out[out.length - 1] = Seg(p.start, s.end, s.dialogue, '${p.speak} ${s.speak}');
+        continue;
+      }
+    }
+    out.add(s);
+  }
+  return out;
+}
+
+/// Motor de lectura: arma la cola de frases para el motor de voz del iPhone.
+class ReaderEngine extends ChangeNotifier {
   ReaderEngine._();
   static final ReaderEngine I = ReaderEngine._();
 
-  final FlutterTts _tts = FlutterTts();
   final ValueNotifier<HL?> hl = ValueNotifier(null);
   ReaderAudioHandler? _handler;
 
@@ -38,14 +71,26 @@ class ReaderEngine extends ChangeNotifier with WidgetsBindingObserver {
   bool playing = false;
   bool loading = false;
   String? notice;
+
+  // Cola nativa
   int _gen = 0;
-  bool _foreground = true;
+  int _nextId = 1;
+  final Map<int, _Utt> _q = {};
+  int _queuedPara = -1;
+  bool _enqueueing = false;
+  bool _nativePaused = false;
+  bool _haltAfterQueue = false;
+  bool _interrupted = false;
+  int _lastGender = 0;
+  Timer? _ticker;
 
-  Completer<void>? _utterance;
-  String _applied = ''; // estilo de voz aplicado (para no repetir llamadas)
+  // Voces
+  List<NativeVoice> voices = [];
+  NativeVoice? female;
+  NativeVoice? male;
+  NativeVoice? english;
 
-  List<Map<String, String>> voices = [];
-
+  // Temporizador
   DateTime? sleepAt;
   bool sleepEndOfSection = false;
   Timer? _sleepTimer;
@@ -53,37 +98,61 @@ class ReaderEngine extends ChangeNotifier with WidgetsBindingObserver {
   // ------------------------------------------------------------ inicio
 
   Future<void> init() async {
-    WidgetsBinding.instance.addObserver(this);
-    if (Platform.isIOS) {
-      try {
-        await _tts.setSharedInstance(true);
-        await _tts.setIosAudioCategory(
-          IosTextToSpeechAudioCategory.playback,
-          [
-            IosTextToSpeechAudioCategoryOptions.allowBluetooth,
-            IosTextToSpeechAudioCategoryOptions.allowBluetoothA2DP,
-          ],
-          IosTextToSpeechAudioMode.spokenAudio,
-        );
-        // Mantiene viva la sesión de audio entre frases (necesario en segundo plano).
-        await _tts.autoStopSharedSession(false);
-      } catch (_) {}
-    }
-    await _tts.awaitSpeakCompletion(false);
-    _tts.setCompletionHandler(_finishUtterance);
-    _tts.setCancelHandler(_finishUtterance);
-    _tts.setErrorHandler((dynamic _) => _finishUtterance());
+    LectorTts.init();
+    LectorTts.onStart = _onStart;
+    LectorTts.onFinish = _onFinish;
+    LectorTts.onInterrupt = _onInterrupt;
+    LectorTts.onRouteLost = _onRouteLost;
     await loadVoices();
-  }
-
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    _foreground = state == AppLifecycleState.resumed;
   }
 
   void attachHandler(ReaderAudioHandler h) {
     _handler = h;
     _sync();
+  }
+
+  // ------------------------------------------------------------ voces
+
+  Future<void> loadVoices() async {
+    voices = await LectorTts.voices();
+    final usable = voices.where((v) => !_novelty.contains(_norm(v.name))).toList();
+    final es = usable.where((v) => v.lang.toLowerCase().startsWith('es')).toList();
+    final en = usable.where((v) => v.lang.toLowerCase().startsWith('en')).toList();
+    female = _best(es, const ['monica', 'paulina', 'marisol', 'isabela', 'angelica', 'soledad', 'francisca'], 2);
+    male = _best(es, const ['jorge', 'juan', 'diego', 'carlos', 'pablo', 'andres'], 1);
+    english = _best(en, const ['ava', 'samantha', 'zoe', 'allison', 'susan', 'evan', 'nathan', 'tom'], 0);
+    notifyListeners();
+  }
+
+  NativeVoice? _best(List<NativeVoice> list, List<String> names, int gender) {
+    int byQuality(NativeVoice a, NativeVoice b) {
+      final q = b.quality.compareTo(a.quality);
+      if (q != 0) return q;
+      // A igual calidad, preferimos español de España (como Mónica y Jorge).
+      final ea = a.lang.toLowerCase() == 'es-es' ? 0 : 1;
+      final eb = b.lang.toLowerCase() == 'es-es' ? 0 : 1;
+      return ea.compareTo(eb);
+    }
+
+    for (final n in names) {
+      final c = list.where((v) => _norm(v.name).startsWith(n)).toList()..sort(byQuality);
+      if (c.isNotEmpty) return c.first;
+    }
+    if (gender != 0) {
+      final c = list.where((v) => v.gender == gender).toList()..sort(byQuality);
+      if (c.isNotEmpty) return c.first;
+    }
+    final c = List<NativeVoice>.of(list)..sort(byQuality);
+    return c.isEmpty ? null : c.first;
+  }
+
+  NativeVoice? get narrator => Prefs.I.narratorMale ? (male ?? female) : (female ?? male);
+  NativeVoice? get otherVoice => Prefs.I.narratorMale ? female : male;
+
+  String get currentVoiceLabel {
+    final n = narrator;
+    if (n == null) return 'Voz del iPhone';
+    return n.quality >= 2 ? '${n.name} · ${n.qualityLabel}' : n.name;
   }
 
   // ------------------------------------------------------------ libro
@@ -95,6 +164,7 @@ class ReaderEngine extends ChangeNotifier with WidgetsBindingObserver {
       return;
     }
     if (playing) await pause();
+    await _hardStop();
     final c = await Library.I.content(m.id);
     final tr = await Library.I.translation(m.id);
     meta = m;
@@ -102,6 +172,7 @@ class ReaderEngine extends ChangeNotifier with WidgetsBindingObserver {
     translation = tr;
     idx = c.paras.isEmpty ? 0 : m.position.clamp(0, c.paras.length - 1);
     _seg = 0;
+    _lastGender = 0;
     hl.value = null;
     m.opened = DateTime.now();
     Library.I.touch();
@@ -110,9 +181,9 @@ class ReaderEngine extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   void close() {
-    _gen++;
     playing = false;
-    _tts.stop();
+    _hardStop();
+    _stopTicker();
     meta = null;
     content = null;
     translation = null;
@@ -133,41 +204,74 @@ class ReaderEngine extends ChangeNotifier with WidgetsBindingObserver {
   Future<void> play() async {
     if (content == null || playing) return;
     playing = true;
+    _interrupted = false;
+    _startTicker();
     notifyListeners();
-    _sync();
-    unawaited(_run());
+    if (_nativePaused && _q.isNotEmpty) {
+      _nativePaused = false;
+      final ok = await LectorTts.resume();
+      if (ok) {
+        _sync();
+        return;
+      }
+    }
+    await _startFrom();
   }
 
   Future<void> pause() async {
     if (!playing) return;
     playing = false;
-    _gen++;
-    await _tts.stop();
-    _finishUtterance();
+    _stopTicker();
+    await LectorTts.pause();
+    _nativePaused = true;
     loading = false;
     notifyListeners();
     _sync();
     _save();
+    Stats.I.save();
   }
 
   Future<void> toggle() => playing ? pause() : play();
 
-  Future<void> jumpTo(int i, {bool? play}) async {
+  Future<void> jumpTo(int i, {bool? play, int seg = 0}) async {
     final c = content;
     if (c == null || c.paras.isEmpty) return;
     final shouldPlay = play ?? playing;
-    if (playing) await pause();
+    await _hardStop();
     idx = i.clamp(0, c.paras.length - 1);
-    _seg = 0;
+    _seg = seg;
     hl.value = null;
     _save();
     notifyListeners();
     _sync();
-    if (shouldPlay) await this.play();
+    if (shouldPlay) {
+      playing = false;
+      await this.play();
+    } else {
+      playing = false;
+      _stopTicker();
+      notifyListeners();
+    }
   }
 
   Future<void> next() => jumpTo(idx + 1);
   Future<void> prev() => jumpTo(idx - 1);
+
+  /// Vuelve a escuchar la frase actual.
+  Future<void> repeatSentence() => jumpTo(idx, seg: _seg, play: true);
+
+  Future<void> prevSentence() async {
+    if (_seg > 0) return jumpTo(idx, seg: _seg - 1);
+    if (idx == 0) return jumpTo(0);
+    final n = mergedSegments(textAt(idx - 1)).length;
+    return jumpTo(idx - 1, seg: n > 0 ? n - 1 : 0);
+  }
+
+  Future<void> nextSentence() async {
+    final n = mergedSegments(textAt(idx)).length;
+    if (_seg + 1 < n) return jumpTo(idx, seg: _seg + 1);
+    return jumpTo(idx + 1);
+  }
 
   Future<void> skipSection(int dir) async {
     final c = content;
@@ -178,262 +282,330 @@ class ReaderEngine extends ChangeNotifier with WidgetsBindingObserver {
     return jumpTo(c.sections[t].start);
   }
 
-  /// Repite la frase actual (después de cambiar voz, velocidad o idioma).
+  /// Después de cambiar voz, velocidad o idioma: sigue desde la frase actual con lo nuevo.
   Future<void> _restartHere() async {
-    _applied = '';
-    if (!playing) return;
-    await pause();
-    await play();
+    if (playing) {
+      await _startFrom();
+    } else {
+      await _hardStop();
+    }
   }
 
-  // ------------------------------------------------------------ lectura frase por frase
+  Future<void> _hardStop() async {
+    _gen++;
+    _q.clear();
+    _nativePaused = false;
+    _enqueueing = false;
+    _haltAfterQueue = false;
+    await LectorTts.stop();
+  }
 
-  double get _pauseScale => const [0.5, 1.0, 1.8][Prefs.I.pauseLevel];
+  // ------------------------------------------------------------ cola de frases
 
-  Future<String> _textForSpeech(int i) async {
+  Future<void> _startFrom() async {
+    await _hardStop();
+    final gen = _gen;
+    _queuedPara = idx - 1;
+    await _enqueuePara(idx, gen, fromSeg: _seg);
+    if (gen != _gen) return;
+    await _enqueuePara(_queuedPara + 1, gen);
+  }
+
+  Future<String> _textForSpeech(int i, {bool show = false}) async {
     final m = meta, c = content, tr = translation;
     if (m == null || c == null) return '';
     if (m.useTranslation && tr != null && tr[i] == null) {
-      loading = true;
-      notifyListeners();
+      if (show) {
+        loading = true;
+        notifyListeners();
+      }
       final t = await Translator.I.translateOne(c.paras[i]);
       if (t != null) tr[i] = t;
-      loading = false;
-      notifyListeners();
+      if (show) {
+        loading = false;
+        notifyListeners();
+      }
     }
     return textAt(i);
   }
 
-  Future<void> _run() async {
-    final gen = ++_gen;
+  Future<void> _enqueuePara(int p, int gen, {int fromSeg = 0}) async {
     final c = content;
-    if (c == null) return;
-    while (playing && gen == _gen) {
-      final text = await _textForSpeech(idx);
-      if (!playing || gen != _gen) return;
-      final segs = segmentText(text);
-      final isHeading = c.sections.any((s) => s.start == idx && s.title != 'Inicio');
+    if (c == null || p < 0 || p >= c.paras.length) return;
+    // Temporizador «al terminar el capítulo»: no seguimos con el capítulo siguiente.
+    if (sleepEndOfSection && p != idx && c.sections.any((s) => s.start == p && s.start != 0)) {
+      _haltAfterQueue = true;
+      return;
+    }
+    _enqueueing = true;
+    var guard = 0;
+    var para = p;
+    while (gen == _gen && para < c.paras.length && guard < 20) {
+      guard++;
+      final text = await _textForSpeech(para, show: para == idx);
+      if (gen != _gen) return;
+      final segs = mergedSegments(text);
+      final start = para == p ? fromSeg.clamp(0, segs.isEmpty ? 0 : segs.length - 1) : 0;
+      final utts = _build(para, segs, start, c);
+      _queuedPara = para;
+      if (utts.isEmpty) {
+        para++; // párrafo sin texto para leer: seguimos con el próximo
+        continue;
+      }
+      try {
+        await LectorTts.enqueue(utts);
+      } catch (_) {
+        notice = 'No pude usar la voz del iPhone.';
+        playing = false;
+        notifyListeners();
+      }
+      break;
+    }
+    _enqueueing = false;
+  }
 
-      for (var k = _seg; k < segs.length; k++) {
-        if (!playing || gen != _gen) return;
-        _seg = k;
-        final s = segs[k];
-        hl.value = HL(idx, s.start, s.end);
-        _sync();
-        await _applyStyle(s.dialogue);
-        if (!playing || gen != _gen) return;
-        await _say(speechText(s.speak, spanish: !readingEnglish));
-        if (!playing || gen != _gen) return;
-        // Pausa entre frases: más larga al cambiar entre narración y diálogo.
-        final last = k == segs.length - 1;
-        if (!last) {
-          final change = segs[k + 1].dialogue != s.dialogue;
-          await _pause(change ? 0.30 : 0.14);
+  double _rate(double s) {
+    // 0.5 es la velocidad «normal» de Apple, rápida para leer libros. Acá 1.0× = 0.46.
+    final r = s <= 1 ? 0.46 - (1 - s) * 0.32 : 0.46 + (s - 1) * 0.26;
+    return r.clamp(0.2, 0.78).toDouble();
+  }
+
+  double _voiceFactor(NativeVoice? v) {
+    if (v != null && male != null && v.id == male!.id) return Prefs.I.speedMale;
+    return Prefs.I.speedFemale;
+  }
+
+  /// Arma las frases con su voz, tono, velocidad y pausas.
+  List<Utterance> _build(int para, List<Seg> segs, int from, BookContent c, {bool register = true}) {
+    final pr = Prefs.I;
+    final narr = narrator;
+    final other = otherVoice;
+    final english = readingEnglish;
+    final cue = paragraphCue(segs);
+    final heading = c.sections.any((s) => s.start == para && s.title != 'Inicio');
+    final nextHeading = c.sections.any((s) => s.start == para + 1);
+    final pauseK = const [0.55, 1.0, 1.7][pr.pauseLevel] / pr.speed.clamp(0.6, 1.8);
+
+    // ¿Quién habla en este párrafo? Si no hay pistas, alternamos (en una charla suelen turnarse).
+    var gender = cue.gender;
+    if (segs.any((s) => s.dialogue)) {
+      if (gender == 0) {
+        gender = _lastGender == 0 ? (pr.narratorMale ? 2 : 1) : (_lastGender == 1 ? 2 : 1);
+      }
+      if (register) _lastGender = gender;
+    }
+
+    final out = <Utterance>[];
+    for (var k = from; k < segs.length; k++) {
+      final s = segs[k];
+      NativeVoice? voice = narr;
+      var pitch = 1.0;
+      var volume = 1.0;
+      var spd = pr.speed;
+      var lang = 'es-ES';
+
+      if (english) {
+        voice = this.english;
+        lang = 'en-US';
+      } else if (s.dialogue) {
+        switch (pr.dialogueMode) {
+          case DialogueMode.igual:
+            break;
+          case DialogueMode.tono:
+            pitch = 1.12;
+            spd *= 0.96;
+            break;
+          case DialogueMode.otraVoz:
+            if (other != null) {
+              voice = other;
+            } else {
+              pitch = 1.12;
+            }
+            break;
+          case DialogueMode.personajes:
+            final target = gender == 1 ? male : female;
+            voice = target ?? narr;
+            // Si el personaje tiene la misma voz que el narrador, le cambiamos un poco el tono.
+            if (voice?.id == narr?.id) pitch = gender == 1 ? 0.94 : 1.1;
+            break;
+        }
+        if (pr.expressive) {
+          if (cue.tone == 1) {
+            volume = 0.72;
+            spd *= 0.9;
+            pitch -= 0.04;
+          } else if (cue.tone == 2 || s.speak.endsWith('!')) {
+            pitch += 0.06;
+            spd *= 1.03;
+          }
         }
       }
-      if (!playing || gen != _gen) return;
+      if (!english) spd *= _voiceFactor(voice);
 
-      // Fin del párrafo.
-      _seg = 0;
-      final nextIdx = idx + 1;
-      if (nextIdx >= c.paras.length) {
+      final last = k == segs.length - 1;
+      double post;
+      if (last) {
+        post = (heading || nextHeading) ? 0.95 : 0.5;
+      } else {
+        post = segs[k + 1].dialogue != s.dialogue ? 0.34 : 0.13;
+      }
+      final pre = (heading && k == 0) ? 0.25 : 0.0;
+
+      final text = speechText(s.speak, spanish: !english);
+      if (text.isEmpty) continue;
+      final id = _nextId++;
+      if (register) {
+        final lastOfBook = last && para == c.paras.length - 1;
+        _q[id] = _Utt(id, para, k, s.start, s.end, last, lastOfBook);
+      }
+      out.add(Utterance(
+        id: id,
+        text: text,
+        voiceId: voice?.id,
+        lang: lang,
+        rate: _rate(spd),
+        pitch: pitch.clamp(0.75, 1.5).toDouble(),
+        volume: volume,
+        pre: pre,
+        post: post * pauseK,
+      ));
+    }
+    return out;
+  }
+
+  void _onStart(int id) {
+    final u = _q[id];
+    if (u == null) return;
+    if (u.para != idx) {
+      idx = u.para;
+      _save();
+      notifyListeners();
+    }
+    _seg = u.seg;
+    hl.value = HL(u.para, u.start, u.end);
+    _sync();
+    // Cuando empieza el último párrafo de la cola, preparamos el siguiente: así no hay cortes.
+    if (u.para >= _queuedPara && !_enqueueing && !_haltAfterQueue) {
+      _enqueuePara(_queuedPara + 1, _gen);
+    }
+  }
+
+  void _onFinish(int id) {
+    final u = _q.remove(id);
+    if (u == null) return;
+    if (u.lastOfBook) {
+      playing = false;
+      _stopTicker();
+      hl.value = null;
+      final m = meta;
+      if (m != null) {
+        m.position = u.para;
+        Library.I.touch();
+      }
+      Stats.I.bookFinished();
+      notifyListeners();
+      _sync();
+      return;
+    }
+    if (u.lastOfPara) {
+      final c = content;
+      if (c != null && u.para + 1 < c.paras.length && _q.isNotEmpty) {
+        // El próximo párrafo ya está en cola; actualizamos la posición.
+        final timeUp = sleepAt != null && DateTime.now().isAfter(sleepAt!);
+        if (timeUp) {
+          idx = u.para + 1;
+          _seg = 0;
+          clearSleep();
+          pause();
+          return;
+        }
+      }
+    }
+    if (_q.isEmpty && playing && !_enqueueing) {
+      if (_haltAfterQueue) {
+        // Terminó el capítulo con el temporizador activo.
+        _haltAfterQueue = false;
+        final c = content;
+        if (c != null && u.para + 1 < c.paras.length) idx = u.para + 1;
+        _seg = 0;
         playing = false;
+        _stopTicker();
+        clearSleep();
+        _save();
         hl.value = null;
         notifyListeners();
         _sync();
-        return;
-      }
-      final timeUp = sleepAt != null && DateTime.now().isAfter(sleepAt!);
-      final chapterEnd = sleepEndOfSection && c.sections.any((s) => s.start == nextIdx);
-      idx = nextIdx;
-      _save();
-      notifyListeners();
-      if (timeUp || chapterEnd) {
-        playing = false;
-        hl.value = null;
-        clearSleep();
-        _sync();
-        return;
-      }
-      final nextIsHeading = c.sections.any((s) => s.start == nextIdx && s.title != 'Inicio');
-      await _pause(isHeading || nextIsHeading ? 0.9 : 0.40);
-    }
-  }
-
-  /// Silencio entre frases. En segundo plano se acorta para que iOS no corte el audio.
-  Future<void> _pause(double seconds) async {
-    if (!_foreground) return;
-    final ms = (seconds * _pauseScale * 1000 / Prefs.I.speed.clamp(0.6, 1.8)).round();
-    if (ms > 0) await Future.delayed(Duration(milliseconds: ms));
-  }
-
-  Future<void> _say(String text) async {
-    if (text.trim().isEmpty) return;
-    final done = Completer<void>();
-    _utterance = done;
-    await _tts.speak(text);
-    // Por si el iPhone no avisa que terminó: tiempo máximo razonable.
-    final limit = Duration(milliseconds: 4000 + (text.length * 180 / Prefs.I.speed).round());
-    await done.future.timeout(limit, onTimeout: () {});
-    if (identical(_utterance, done)) _utterance = null;
-  }
-
-  void _finishUtterance() {
-    final u = _utterance;
-    if (u != null && !u.isCompleted) u.complete();
-  }
-
-  // ------------------------------------------------------------ voz, tono y velocidad
-
-  double _rate(double s) {
-    // En iPhone 0.5 es la velocidad «normal» de Apple, que para leer libros es rápida.
-    // Acá 1.0× equivale a 0.45, más pausado y claro.
-    final r = s <= 1 ? 0.45 - (1 - s) * 0.30 : 0.45 + (s - 1) * 0.28;
-    return r.clamp(0.25, 0.75).toDouble();
-  }
-
-  Future<void> _applyStyle(bool dialogue) async {
-    final p = Prefs.I;
-    String key;
-    Map<String, String>? voice;
-    double pitch = 1.0;
-    double rate = _rate(p.speed);
-
-    if (readingEnglish) {
-      key = 'en';
-    } else if (dialogue && p.dialogueMode == DialogueMode.otraVoz && dialogueVoice != null) {
-      voice = dialogueVoice;
-      rate = _rate(p.speed * 0.97);
-      key = 'dv:${voice!['name']}';
-    } else if (dialogue && p.dialogueMode == DialogueMode.tono) {
-      voice = currentVoice;
-      pitch = 1.14;
-      rate = _rate(p.speed * 0.95);
-      key = 'dt';
-    } else {
-      voice = currentVoice;
-      key = 'n';
-    }
-    key = '$key|${p.speed}|${voice?['name']}';
-    if (key == _applied) return;
-    _applied = key;
-
-    if (readingEnglish) {
-      final en = englishVoice;
-      if (en != null) {
-        await _tts.setVoice({'name': en['name']!, 'locale': en['locale']!});
       } else {
-        await _tts.setLanguage('en-US');
+        // La cola se vació (por ejemplo, la traducción tardó): seguimos.
+        _seg = 0;
+        final c = content;
+        if (c != null && u.para + 1 < c.paras.length) {
+          idx = u.para + 1;
+          _startFrom();
+        }
       }
-    } else if (voice != null) {
-      await _tts.setVoice({'name': voice['name']!, 'locale': voice['locale']!});
-    } else {
-      await _tts.setLanguage('es-ES');
     }
-    await _tts.setPitch(pitch);
-    await _tts.setSpeechRate(rate);
   }
 
-  Future<void> loadVoices() async {
-    try {
-      final raw = await _tts.getVoices;
-      final list = <Map<String, String>>[];
-      for (final v in (raw as List)) {
-        if (v is! Map) continue;
-        final m = {for (final e in v.entries) e.key.toString(): e.value.toString()};
-        final loc = (m['locale'] ?? '').toLowerCase();
-        if (loc.startsWith('es') || loc.startsWith('en')) list.add(m);
+  void _onInterrupt(bool began, bool resume) {
+    if (began) {
+      if (playing) {
+        _interrupted = true;
+        pause();
       }
-      list.sort((a, b) {
-        final la = (a['locale'] ?? '').toLowerCase().startsWith('es') ? 0 : 1;
-        final lb = (b['locale'] ?? '').toLowerCase().startsWith('es') ? 0 : 1;
-        if (la != lb) return la - lb;
-        final r = _rank(a).compareTo(_rank(b));
-        return r != 0 ? r : (a['name'] ?? '').compareTo(b['name'] ?? '');
-      });
-      voices = list;
-      notifyListeners();
-    } catch (_) {}
-  }
-
-  static String _norm(String s) => s
-      .toLowerCase()
-      .replaceAll('á', 'a')
-      .replaceAll('é', 'e')
-      .replaceAll('í', 'i')
-      .replaceAll('ó', 'o')
-      .replaceAll('ú', 'u');
-
-  static int _rank(Map<String, String> v) {
-    final q = (v['quality'] ?? '').toLowerCase();
-    final n = _norm('${v['name']} ${v['identifier'] ?? ''}');
-    if (q.contains('premium') || n.contains('premium')) return 0;
-    if (q.contains('enhanced') || n.contains('enhanced') || n.contains('mejorada')) return 1;
-    return 2;
-  }
-
-  static String quality(Map<String, String> v) => const ['Premium', 'Mejorada', 'Estándar'][_rank(v)];
-
-  List<Map<String, String>> get spanishVoices =>
-      voices.where((v) => (v['locale'] ?? '').toLowerCase().startsWith('es')).toList();
-
-  Map<String, String>? _find(String? name, String? locale) {
-    if (name == null) return null;
-    for (final v in voices) {
-      if (v['name'] == name && v['locale'] == locale) return v;
+    } else if (resume && _interrupted) {
+      _interrupted = false;
+      play();
     }
-    return null;
   }
 
-  /// La voz elegida, o la mejor «Mónica» disponible, o la mejor voz en español.
-  Map<String, String>? get currentVoice {
-    final chosen = _find(Prefs.I.voiceName, Prefs.I.voiceLocale);
-    if (chosen != null) return chosen;
-    final es = spanishVoices;
-    for (final v in es) {
-      if (_norm(v['name'] ?? '').contains('monica')) return v;
-    }
-    return es.isNotEmpty ? es.first : null;
+  void _onRouteLost() {
+    if (!playing) return;
+    playing = false;
+    _nativePaused = true;
+    _stopTicker();
+    notice = 'Se desconectaron los auriculares: pausé la lectura.';
+    notifyListeners();
+    _sync();
+    _save();
   }
 
-  Map<String, String>? get dialogueVoice => _find(Prefs.I.dialogueVoiceName, Prefs.I.dialogueVoiceLocale);
+  // ------------------------------------------------------------ muestras
 
-  Map<String, String>? get englishVoice {
-    for (final v in voices) {
-      if ((v['locale'] ?? '').toLowerCase().startsWith('en')) return v;
-    }
-    return null;
-  }
-
-  String get currentVoiceLabel {
-    final v = currentVoice;
-    if (v == null) return 'Voz del iPhone';
-    final q = quality(v);
-    return q == 'Estándar' ? v['name']! : '${v['name']} · $q';
-  }
-
-  /// Escucha cómo suena una voz.
-  Future<void> preview(Map<String, String> v, {bool dialogue = false}) async {
+  Future<void> _sampleStop() async {
     if (playing) await pause();
-    _applied = '';
-    await _tts.setVoice({'name': v['name']!, 'locale': v['locale']!});
-    await _tts.setPitch(dialogue && Prefs.I.dialogueMode == DialogueMode.tono ? 1.14 : 1.0);
-    await _tts.setSpeechRate(_rate(Prefs.I.speed));
-    final sample = (v['locale'] ?? '').toLowerCase().startsWith('en')
-        ? 'Hello. This is how I sound reading your book.'
-        : (dialogue ? '¿De verdad creés que vamos a llegar a tiempo?' : 'Hola. Así sueno cuando leo tu libro, frase por frase.');
-    await _tts.speak(sample);
+    await _hardStop();
   }
 
+  Future<void> preview(NativeVoice v) async {
+    await _sampleStop();
+    final english = v.lang.toLowerCase().startsWith('en');
+    await LectorTts.enqueue([
+      Utterance(
+        id: -1,
+        text: english
+            ? 'Hello. This is how I sound reading your book.'
+            : 'Hola, soy ${v.name}. Así sueno cuando leo tu libro, frase por frase.',
+        voiceId: v.id,
+        lang: v.lang,
+        rate: _rate(Prefs.I.speed * _voiceFactor(v)),
+      ),
+    ]);
+  }
+
+  /// Un ejemplo corto de narración con diálogos, con los ajustes actuales.
   Future<void> previewDialogue() async {
-    if (playing) await pause();
-    _applied = '';
-    await _applyStyle(false);
-    await _say('Ella lo miró en silencio y le preguntó:');
-    await Future.delayed(const Duration(milliseconds: 300));
-    await _applyStyle(true);
-    await _say('¿De verdad creés que vamos a llegar a tiempo?');
-    _applied = '';
+    await _sampleStop();
+    const sample = 'Ella se acercó a la ventana y miró la lluvia.\n'
+        '—¿De verdad creés que vamos a llegar a tiempo? —preguntó ella en voz baja.';
+    const sample2 = '—Si salimos ahora, sí —respondió él—. ¡Vamos!';
+    final fake = BookContent(const [Section('Inicio', 0)], const [sample, sample2]);
+    final saveGender = _lastGender;
+    _lastGender = 0;
+    final u1 = _build(0, mergedSegments(sample), 0, fake, register: false);
+    final u2 = _build(1, mergedSegments(sample2), 0, fake, register: false);
+    _lastGender = saveGender;
+    await LectorTts.enqueue([...u1, ...u2]);
   }
 
   // ------------------------------------------------------------ ajustes
@@ -476,6 +648,7 @@ class ReaderEngine extends ChangeNotifier with WidgetsBindingObserver {
     clearSleep();
     sleepEndOfSection = true;
     notifyListeners();
+    if (playing) _restartHere();
   }
 
   void clearSleep() {
@@ -490,16 +663,34 @@ class ReaderEngine extends ChangeNotifier with WidgetsBindingObserver {
 
   void refresh() => notifyListeners();
 
-  // ------------------------------------------------------------ marcadores
+  // ------------------------------------------------------------ marcadores y notas
 
   void toggleBookmark(int i) {
     final m = meta;
     if (m == null) return;
     if (m.bookmarks.contains(i)) {
       m.bookmarks.remove(i);
+      m.notes.remove('$i');
     } else {
       m.bookmarks.add(i);
       m.bookmarks.sort();
+    }
+    Library.I.touch();
+    notifyListeners();
+  }
+
+  void setNote(int i, String text) {
+    final m = meta;
+    if (m == null) return;
+    final t = text.trim();
+    if (t.isEmpty) {
+      m.notes.remove('$i');
+    } else {
+      m.notes['$i'] = t;
+      if (!m.bookmarks.contains(i)) {
+        m.bookmarks.add(i);
+        m.bookmarks.sort();
+      }
     }
     Library.I.touch();
     notifyListeners();
@@ -530,6 +721,18 @@ class ReaderEngine extends ChangeNotifier with WidgetsBindingObserver {
 
   // ------------------------------------------------------------ interno
 
+  void _startTicker() {
+    _ticker?.cancel();
+    _ticker = Timer.periodic(const Duration(seconds: 5), (_) {
+      if (playing) Stats.I.addSeconds(5);
+    });
+  }
+
+  void _stopTicker() {
+    _ticker?.cancel();
+    _ticker = null;
+  }
+
   void _save() {
     final m = meta;
     if (m == null) return;
@@ -546,6 +749,7 @@ class ReaderEngine extends ChangeNotifier with WidgetsBindingObserver {
 }
 
 /// Controles de la pantalla bloqueada, el Centro de control y los auriculares.
+/// Los botones de adelantar y atrasar saltan de a una frase.
 class ReaderAudioHandler extends BaseAudioHandler {
   String _lastKey = '';
 
@@ -559,10 +763,16 @@ class ReaderAudioHandler extends BaseAudioHandler {
   Future<void> stop() => ReaderEngine.I.pause();
 
   @override
-  Future<void> skipToNext() => ReaderEngine.I.next();
+  Future<void> skipToNext() => ReaderEngine.I.nextSentence();
 
   @override
-  Future<void> skipToPrevious() => ReaderEngine.I.prev();
+  Future<void> skipToPrevious() => ReaderEngine.I.prevSentence();
+
+  @override
+  Future<void> fastForward() => ReaderEngine.I.nextSentence();
+
+  @override
+  Future<void> rewind() => ReaderEngine.I.prevSentence();
 
   void sync(bool playing, String section, String book, String author, Uri? art) {
     final key = '$playing|$section|$book';

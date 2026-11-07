@@ -6,11 +6,13 @@ import 'prefs.dart';
 import 'reader_engine.dart';
 import 'screens/library_screen.dart';
 import 'theme.dart';
+import 'voices.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Prefs.I.load();
   await Library.I.init();
+  await Voices.I.init();
   await ReaderEngine.I.init();
   try {
     final handler = await AudioService.init(
@@ -23,7 +25,7 @@ Future<void> main() async {
     );
     ReaderEngine.I.attachHandler(handler);
   } catch (_) {
-    // Si fallan los controles de pantalla bloqueada, la app sigue andando igual.
+    // Si fallan los controles de la pantalla bloqueada, la app sigue andando igual.
   }
   runApp(const LectorApp());
 }
@@ -35,12 +37,23 @@ class LectorApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return ListenableBuilder(
       listenable: Prefs.I,
-      builder: (context, _) => MaterialApp(
-        title: 'Lector',
-        debugShowCheckedModeBanner: false,
-        theme: buildTheme(Prefs.I.theme),
-        home: const LibraryScreen(),
-      ),
+      builder: (context, _) {
+        final t = Prefs.I.theme;
+        final light = paletteFor(t == AppTheme.sepia ? AppTheme.sepia : AppTheme.claro);
+        final mode = switch (t) {
+          AppTheme.auto => ThemeMode.system,
+          AppTheme.noche => ThemeMode.dark,
+          _ => ThemeMode.light,
+        };
+        return MaterialApp(
+          title: 'Lector',
+          debugShowCheckedModeBanner: false,
+          theme: buildTheme(light),
+          darkTheme: buildTheme(nightPalette),
+          themeMode: mode,
+          home: const LibraryScreen(),
+        );
+      },
     );
   }
 }

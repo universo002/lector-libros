@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:isolate';
+import 'dart:typed_data';
 
 import 'package:archive/archive.dart';
 import 'package:html/dom.dart' as dom;
@@ -200,13 +201,45 @@ Map<String, dynamic> _epub(String path, String fname, SendPort sp) {
   final author = _first(_els(opf, 'creator'))?.innerText.trim() ?? '';
 
   final manifest = <String, String>{};
-  String? navHref, ncxHref;
+  final media = <String, String>{};
+  String? navHref, ncxHref, coverHref;
   for (final it in _els(opf, 'item')) {
     final id = it.getAttribute('id'), href = it.getAttribute('href');
     if (id == null || href == null) continue;
     manifest[id] = href;
-    if ((it.getAttribute('properties') ?? '').split(' ').contains('nav')) navHref = href;
+    media[id] = it.getAttribute('media-type') ?? '';
+    final props = (it.getAttribute('properties') ?? '').split(' ');
+    if (props.contains('nav')) navHref = href;
+    if (props.contains('cover-image')) coverHref = href;
     if (it.getAttribute('media-type') == 'application/x-dtbncx+xml') ncxHref = href;
+  }
+
+  // Portada del EPUB.
+  if (coverHref == null) {
+    for (final m in _els(opf, 'meta')) {
+      if (m.getAttribute('name') == 'cover') {
+        final cid = m.getAttribute('content');
+        if (cid != null && manifest[cid] != null) coverHref = manifest[cid];
+      }
+    }
+  }
+  if (coverHref == null) {
+    for (final e in manifest.entries) {
+      final isImg = (media[e.key] ?? '').startsWith('image/');
+      if (isImg && (e.key.toLowerCase().contains('cover') || e.value.toLowerCase().contains('cover'))) {
+        coverHref = e.value;
+        break;
+      }
+    }
+  }
+  Uint8List? cover;
+  if (coverHref != null) {
+    final cf = files[_resolve(base, coverHref)];
+    if (cf != null) {
+      try {
+        cover = Uint8List.fromList(cf.content as List<int>);
+      } catch (_) {}
+    }
   }
 
   // Títulos de capítulos desde la tabla de contenidos.
@@ -263,6 +296,7 @@ Map<String, dynamic> _epub(String path, String fname, SendPort sp) {
   }
   final pages = (paras.fold<int>(0, (a, s) => a + s.length) / 1800).ceil();
   return {
+    'cover': cover,
     'title': title,
     'author': author,
     'format': 'EPUB',

@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:isolate';
+import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
@@ -48,10 +49,11 @@ class Library extends ChangeNotifier {
     await File('${_dir.path}/indice.json').writeAsString(data);
   }
 
+  String coverPath(String id) => '${_dir.path}/$id.cover.jpg';
   String _contentPath(String id) => '${_dir.path}/$id.json';
   String _trPath(String id) => '${_dir.path}/$id.es.json';
 
-  Future<BookMeta> add(Map<String, dynamic> r) async {
+  Future<BookMeta> add(Map<String, dynamic> r, {Uint8List? cover}) async {
     final id = DateTime.now().microsecondsSinceEpoch.toString();
     final paras = (r['paras'] as List).cast<String>();
     final secs = (r['sections'] as List).map((s) => Map<String, dynamic>.from(s as Map)).toList();
@@ -73,6 +75,13 @@ class Library extends ChangeNotifier {
       pages: ((r['pages'] ?? 0) as num).toInt(),
       hue: title.codeUnits.fold<int>(7, (a, c) => (a * 31 + c) % 360),
     );
+    final c = cover ?? (r['cover'] is Uint8List ? r['cover'] as Uint8List : null);
+    if (c != null && c.isNotEmpty) {
+      try {
+        await File(coverPath(id)).writeAsBytes(c);
+        meta.hasCover = true;
+      } catch (_) {}
+    }
     books.insert(0, meta);
     await saveNow();
     notifyListeners();
@@ -105,7 +114,7 @@ class Library extends ChangeNotifier {
 
   Future<void> remove(String id) async {
     books.removeWhere((b) => b.id == id);
-    for (final p in [_contentPath(id), _trPath(id)]) {
+    for (final p in [_contentPath(id), _trPath(id), coverPath(id)]) {
       final f = File(p);
       if (await f.exists()) await f.delete();
     }

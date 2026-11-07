@@ -2,27 +2,43 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:audio_service/audio_service.dart';
+import 'package:audio_session/audio_session.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_tts/flutter_tts.dart';
+import 'package:just_audio/just_audio.dart';
+import 'package:path_provider/path_provider.dart';
 
 import 'library.dart';
 import 'models.dart';
+import 'neural_tts.dart';
 import 'prefs.dart';
+import 'segmenter.dart';
 import 'translator.dart';
+import 'voices.dart';
 
-class WordRange {
+/// Parte del texto que se está leyendo (para resaltarla).
+class HL {
   final int para, start, end;
-  const WordRange(this.para, this.start, this.end);
+  const HL(this.para, this.start, this.end);
 }
 
-/// Motor de lectura: maneja la voz, el párrafo actual, el temporizador
-/// y los controles de la pantalla bloqueada.
+class _Para {
+  final int idx;
+  final String text;
+  final List<Seg> spoken;
+  final SynthResult? res;
+  const _Para(this.idx, this.text, this.spoken, this.res);
+}
+
+/// Motor de lectura: voces naturales (Piper) con respaldo en la voz del iPhone.
 class ReaderEngine extends ChangeNotifier {
   ReaderEngine._();
   static final ReaderEngine I = ReaderEngine._();
 
   final FlutterTts _tts = FlutterTts();
-  final ValueNotifier<WordRange?> word = ValueNotifier(null);
+  final AudioPlayer _player = AudioPlayer();
+  final AudioPlayer _preview = AudioPlayer();
+  final ValueNotifier<HL?> hl = ValueNotifier(null);
   ReaderAudioHandler? _handler;
 
   BookMeta? meta;
@@ -31,48 +47,50 @@ class ReaderEngine extends ChangeNotifier {
 
   int idx = 0;
   bool playing = false;
-  int _offset = 0; // desde qué letra del párrafo empezó a hablar
-  int _lastWordStart = 0;
-  int _resumeAt = 0;
+  bool loading = false;
+  String? notice; // mensaje para mostrar una vez
   int _gen = 0;
 
+  // Voces naturales
+  late String _audioDir;
+  final Map<int, Future<_Para?>> _cache = {};
+  String _cacheKey = '';
+  _Para? _cur;
+  int _fileSeq = 0;
+  int _completedFor = -1;
+  bool _forceSystem = false;
+
+  // Voz del iPhone
+  int _offset = 0;
+  int _lastWordStart = 0;
+  int _resumeAt = 0;
+  List<Map<String, String>> sysVoices = [];
+
+  // Temporizador
   DateTime? sleepAt;
   bool sleepEndOfSection = false;
   Timer? _sleepTimer;
 
-  List<Map<String, String>> voices = [];
-
   // ------------------------------------------------------------ inicio
 
   Future<void> init() async {
-    if (Platform.isIOS) {
-      try {
-        await _tts.setSharedInstance(true);
-        await _tts.setIosAudioCategory(
-          IosTextToSpeechAudioCategory.playback,
-          [
-            IosTextToSpeechAudioCategoryOptions.allowBluetooth,
-            IosTextToSpeechAudioCategoryOptions.allowBluetoothA2DP,
-          ],
-          IosTextToSpeechAudioMode.spokenAudio,
-        );
-        // Mantiene viva la sesión de audio entre párrafos (clave para el
-        // segundo plano). Si tu versión de flutter_tts no la tiene, borrá esta línea.
-        await _tts.autoStopSharedSession(false);
-      } catch (_) {}
-    }
-    await _tts.awaitSpeakCompletion(false);
-    _tts.setProgressHandler((String text, int start, int end, String w) {
-      _lastWordStart = _offset + start;
-      word.value = WordRange(idx, _offset + start, _offset + end);
+    final tmp = await getTemporaryDirectory();
+    _audioDir = '${tmp.path}/lector_audio';
+    final d = Directory(_audioDir);
+    if (await d.exists()) await d.delete(recursive: true);
+    await d.create(recursive: true);
+
+    try {
+      final session = await AudioSession.instance;
+      await session.configure(const AudioSessionConfiguration.speech());
+    } catch (_) {}
+
+    _player.positionStream.listen(_onPosition);
+    _player.playerStateStream.listen((s) {
+      if (s.processingState == ProcessingState.completed) _onNeuralDone();
     });
-    _tts.setCompletionHandler(_onDone);
-    _tts.setErrorHandler((dynamic _) {
-      if (playing) _onDone();
-    });
-    await _applyRate();
-    await loadVoices();
-    await _applyVoice();
+
+    await _initSystemVoice();
   }
 
   void attachHandler(ReaderAudioHandler h) {
@@ -89,109 +107,89 @@ class ReaderEngine extends ChangeNotifier {
       return;
     }
     if (playing) await pause();
+    await _stopAll();
     final c = await Library.I.content(m.id);
     final tr = await Library.I.translation(m.id);
     meta = m;
     content = c;
     translation = tr;
     idx = c.paras.isEmpty ? 0 : m.position.clamp(0, c.paras.length - 1);
-    _resumeAt = 0;
-    word.value = null;
+    _resetAudio();
+    hl.value = null;
     m.opened = DateTime.now();
     Library.I.touch();
     notifyListeners();
     _sync();
-    if (m.useTranslation && tr != null) unawaited(Translator.I.ensureModel());
   }
 
   void close() {
     _gen++;
     playing = false;
-    _tts.stop();
+    _stopAll();
+    _resetAudio();
     meta = null;
     content = null;
     translation = null;
-    word.value = null;
+    hl.value = null;
     notifyListeners();
   }
+
+  bool get readingEnglish => meta?.isEnglish == true && meta?.useTranslation != true;
 
   String textAt(int i) {
-    final c = content!;
     final tr = translation;
     if (meta?.useTranslation == true && tr != null && i < tr.length && tr[i] != null) return tr[i]!;
-    return c.paras[i];
+    return content!.paras[i];
   }
 
-  // ------------------------------------------------------------ voz
+  // ------------------------------------------------------------ qué voz usar
 
-  Future<void> _speak() async {
-    final c = content, m = meta;
-    if (c == null || m == null) return;
-    final gen = ++_gen;
-    var text = textAt(idx);
-    final tr = translation;
-    if (m.useTranslation && tr != null && tr[idx] == null) {
-      // Si el párrafo todavía no está traducido, lo traduce al momento.
-      final t = await Translator.I.translateOne(c.paras[idx]);
-      if (t != null) {
-        tr[idx] = t;
-        text = t;
-      }
-      if (gen != _gen || !playing) return;
-    }
-    final from = _resumeAt.clamp(0, text.length);
-    _resumeAt = 0;
-    _offset = from;
-    _lastWordStart = from;
-    final say = text.substring(from);
-    word.value = WordRange(idx, from, from);
-    notifyListeners();
-    _sync();
-    if (say.trim().isEmpty) {
-      _onDone();
-      return;
-    }
-    await _tts.speak(say);
+  VoiceInfo? get narratorVoice => voiceById(readingEnglish ? Prefs.I.english : Prefs.I.narrator);
+
+  VoiceInfo? get dialogueVoiceInfo {
+    if (readingEnglish || !Prefs.I.dialogueVoice) return null;
+    final v = voiceById(Prefs.I.dialogue);
+    return Voices.I.isReady(v) ? v : null;
   }
 
-  void _onDone() {
-    final c = content;
-    if (!playing || c == null) return;
-    final next = idx + 1;
-    if (next >= c.paras.length) {
-      playing = false;
-      _resumeAt = 0;
-      notifyListeners();
-      _sync();
-      return;
+  bool get usingNeural => !Prefs.I.useSystemVoice && !_forceSystem && Voices.I.isReady(narratorVoice);
+
+  String get currentVoiceLabel {
+    if (usingNeural) {
+      final n = narratorVoice!;
+      final d = dialogueVoiceInfo;
+      return d == null || d.id == n.id ? n.name : '${n.name} + ${d.name}';
     }
-    final timeUp = sleepAt != null && DateTime.now().isAfter(sleepAt!);
-    final chapterEnd = sleepEndOfSection && c.sections.any((s) => s.start == next);
-    idx = next;
-    _save();
-    if (timeUp || chapterEnd) {
-      playing = false;
-      _resumeAt = 0;
-      word.value = null;
-      clearSleep();
-      _sync();
-      return;
-    }
-    _speak();
+    return currentSystemVoice?['name'] ?? 'Voz del iPhone';
   }
+
+  // ------------------------------------------------------------ controles
 
   Future<void> play() async {
     if (content == null || playing) return;
     playing = true;
-    await _speak();
+    notifyListeners();
+    if (usingNeural) {
+      final cur = _cur;
+      if (cur != null && cur.idx == idx && _cacheKey == _key() && _player.audioSource != null) {
+        unawaited(_player.play());
+        _sync();
+        return;
+      }
+      await _playNeural();
+    } else {
+      await _speakSystem();
+    }
   }
 
   Future<void> pause() async {
     if (!playing) return;
     playing = false;
     _gen++;
+    if (_player.playing) await _player.pause();
     _resumeAt = _lastWordStart;
     await _tts.stop();
+    loading = false;
     notifyListeners();
     _sync();
     _save();
@@ -204,18 +202,16 @@ class ReaderEngine extends ChangeNotifier {
     if (c == null || c.paras.isEmpty) return;
     final shouldPlay = play ?? playing;
     _gen++;
-    if (playing) await _tts.stop();
+    await _stopAll();
     idx = i.clamp(0, c.paras.length - 1);
+    _cur = null;
     _resumeAt = 0;
-    word.value = null;
-    playing = shouldPlay;
+    hl.value = null;
+    playing = false;
     _save();
-    if (shouldPlay) {
-      await _speak();
-    } else {
-      notifyListeners();
-      _sync();
-    }
+    notifyListeners();
+    _sync();
+    if (shouldPlay) await this.play();
   }
 
   Future<void> next() => jumpTo(idx + 1);
@@ -230,31 +226,270 @@ class ReaderEngine extends ChangeNotifier {
     return jumpTo(c.sections[t].start);
   }
 
+  /// Vuelve a empezar el párrafo actual (después de cambiar voz, velocidad o idioma).
   Future<void> _restartHere() async {
+    _clearCache();
     if (!playing) return;
-    _resumeAt = _lastWordStart;
+    final wasPlaying = playing;
     _gen++;
-    await _tts.stop();
-    await _speak();
+    await _stopAll();
+    playing = false;
+    if (wasPlaying) await play();
   }
 
-  // ------------------------------------------------------------ ajustes
+  // ------------------------------------------------------------ voces naturales
 
-  Future<void> _applyRate() async {
+  String _key() =>
+      '${meta?.id}|${Prefs.I.speed}|${narratorVoice?.id}|${dialogueVoiceInfo?.id}|${meta?.useTranslation}';
+
+  void _resetAudio() {
+    _clearCache();
+    _cur = null;
+    _completedFor = -1;
+    _resumeAt = 0;
+  }
+
+  void _clearCache() {
+    for (final f in _cache.values) {
+      f.then((p) => _deleteFile(p?.res?.path)).catchError((_) {});
+    }
+    _cache.clear();
+    _cacheKey = _key();
+  }
+
+  void _deleteFile(String? path) {
+    if (path == null) return;
+    try {
+      final f = File(path);
+      if (f.existsSync() && path != _cur?.res?.path) f.deleteSync();
+    } catch (_) {}
+  }
+
+  void _trimCache() {
+    final remove = _cache.keys.where((k) => k < idx - 1 || k > idx + 4).toList();
+    for (final k in remove) {
+      final f = _cache.remove(k);
+      f?.then((p) => _deleteFile(p?.res?.path)).catchError((_) {});
+    }
+  }
+
+  Future<_Para?> _ensure(int i) {
+    final k = _key();
+    if (k != _cacheKey) _clearCache();
+    return _cache.putIfAbsent(i, () => _makePara(i));
+  }
+
+  Future<String> _textForSpeech(int i) async {
+    final m = meta, c = content, tr = translation;
+    if (m == null || c == null) return '';
+    if (m.useTranslation && tr != null && tr[i] == null) {
+      final t = await Translator.I.translateOne(c.paras[i]);
+      if (t != null) tr[i] = t;
+    }
+    return textAt(i);
+  }
+
+  Future<_Para?> _makePara(int i) async {
+    final c = content;
+    if (c == null || i < 0 || i >= c.paras.length) return null;
+    final text = await _textForSpeech(i);
+    final segs = segmentText(text);
+    if (segs.isEmpty) return _Para(i, text, const [], null);
+    final narr = narratorVoice!;
+    final dia = dialogueVoiceInfo;
+    final items = <SynthItem>[];
+    for (var k = 0; k < segs.length; k++) {
+      final s = segs[k];
+      final v = (s.dialogue && dia != null) ? dia : narr;
+      final last = k == segs.length - 1;
+      final switchVoice = !last && segs[k + 1].dialogue != s.dialogue;
+      items.add(SynthItem(
+        text: s.speak,
+        model: Voices.I.modelPath(v),
+        tokens: Voices.I.tokensPath(v),
+        dataDir: Voices.I.dataDir(v),
+        sid: v.sid,
+        pauseAfter: last ? 0.55 : (switchVoice ? 0.38 : 0.24),
+      ));
+    }
+    final path = '$_audioDir/p${_fileSeq++}.wav';
+    final res = await NeuralTts.I.synth(items, Prefs.I.speed, path);
+    return _Para(i, text, segs, res);
+  }
+
+  void _prefetch() {
+    final c = content;
+    if (c == null) return;
+    for (var k = idx + 1; k <= idx + 2 && k < c.paras.length; k++) {
+      _ensure(k).catchError((_) => null);
+    }
+    _trimCache();
+  }
+
+  Future<void> _playNeural() async {
+    final gen = ++_gen;
+    loading = true;
+    notifyListeners();
+    _Para? p;
+    try {
+      p = await _ensure(idx);
+    } catch (e) {
+      if (gen != _gen) return;
+      loading = false;
+      _forceSystem = true;
+      notice = 'No pude usar la voz natural en este celular. Sigo con la voz del iPhone.';
+      notifyListeners();
+      if (playing) await _speakSystem();
+      return;
+    }
+    if (gen != _gen || !playing) return;
+    loading = false;
+    if (p == null) {
+      playing = false;
+      notifyListeners();
+      return;
+    }
+    if (p.res == null) {
+      _completedFor = -1;
+      _advanceNeural();
+      return;
+    }
+    _cur = p;
+    _completedFor = -1;
+    try {
+      await _player.setFilePath(p.res!.path);
+    } catch (_) {
+      if (gen != _gen) return;
+      _advanceNeural();
+      return;
+    }
+    if (gen != _gen || !playing) return;
+    unawaited(_player.play());
+    notifyListeners();
+    _sync();
+    _prefetch();
+  }
+
+  void _onPosition(Duration pos) {
+    final p = _cur;
+    if (p == null || p.idx != idx || p.res == null) return;
+    final t = pos.inMilliseconds / 1000.0;
+    final r = p.res!;
+    var k = 0;
+    for (var j = 0; j < r.starts.length; j++) {
+      if (r.starts[j] <= t + 0.03) k = j;
+    }
+    if (k < p.spoken.length) {
+      final s = p.spoken[k];
+      final cur = hl.value;
+      if (cur == null || cur.para != idx || cur.start != s.start) hl.value = HL(idx, s.start, s.end);
+    }
+  }
+
+  void _onNeuralDone() {
+    if (!playing || !usingNeural) return;
+    final p = _cur;
+    if (p == null || p.idx != idx || _completedFor == idx) return;
+    _completedFor = idx;
+    _advanceNeural();
+  }
+
+  void _advanceNeural() {
+    final c = content;
+    if (c == null) return;
+    final next = idx + 1;
+    if (next >= c.paras.length) {
+      playing = false;
+      hl.value = null;
+      notifyListeners();
+      _sync();
+      return;
+    }
+    final timeUp = sleepAt != null && DateTime.now().isAfter(sleepAt!);
+    final chapterEnd = sleepEndOfSection && c.sections.any((s) => s.start == next);
+    idx = next;
+    _save();
+    if (timeUp || chapterEnd) {
+      playing = false;
+      hl.value = null;
+      clearSleep();
+      _sync();
+      return;
+    }
+    _playNeural();
+  }
+
+  /// Escucha cómo suena una voz.
+  Future<void> previewVoice(VoiceInfo v) async {
+    if (!Voices.I.isReady(v)) return;
+    final sample = v.lang == 'en'
+        ? 'Hello, I am ${v.name}. This is how I sound reading your book.'
+        : 'Hola, soy ${v.name}. —¿Así suena un diálogo? —preguntó ella. Así sueno leyendo tu libro.';
+    try {
+      final segs = segmentText(sample);
+      final items = [
+        for (final s in segs)
+          SynthItem(
+            text: s.speak,
+            model: Voices.I.modelPath(v),
+            tokens: Voices.I.tokensPath(v),
+            dataDir: Voices.I.dataDir(v),
+            sid: v.sid,
+            pauseAfter: 0.3,
+          )
+      ];
+      final res = await NeuralTts.I.synth(items, Prefs.I.speed, '$_audioDir/preview${_fileSeq++}.wav');
+      if (playing) await pause();
+      await _preview.setFilePath(res.path);
+      unawaited(_preview.play());
+    } catch (_) {
+      notice = 'No pude reproducir la muestra de ${v.name}.';
+      notifyListeners();
+    }
+  }
+
+  // ------------------------------------------------------------ voz del iPhone
+
+  Future<void> _initSystemVoice() async {
+    if (Platform.isIOS) {
+      try {
+        await _tts.setSharedInstance(true);
+        await _tts.setIosAudioCategory(
+          IosTextToSpeechAudioCategory.playback,
+          [
+            IosTextToSpeechAudioCategoryOptions.allowBluetooth,
+            IosTextToSpeechAudioCategoryOptions.allowBluetoothA2DP,
+          ],
+          IosTextToSpeechAudioMode.spokenAudio,
+        );
+      } catch (_) {}
+    }
+    await _tts.awaitSpeakCompletion(false);
+    _tts.setProgressHandler((String text, int start, int end, String w) {
+      _lastWordStart = _offset + start;
+      hl.value = HL(idx, _offset + start, _offset + end);
+    });
+    _tts.setCompletionHandler(_onSystemDone);
+    _tts.setErrorHandler((dynamic _) {
+      if (playing && !usingNeural) _onSystemDone();
+    });
+    await _applySystemRate();
+    await loadSystemVoices();
+    final v = currentSystemVoice ?? (sysVoices.isNotEmpty ? sysVoices.first : null);
+    if (v != null) {
+      await _tts.setVoice({'name': v['name']!, 'locale': v['locale']!});
+    } else {
+      await _tts.setLanguage('es-ES');
+    }
+  }
+
+  Future<void> _applySystemRate() async {
     final s = Prefs.I.speed;
-    // En iPhone 0.5 es la velocidad normal y 1.0 es el máximo.
     final double r = Platform.isIOS ? (s >= 1 ? 0.5 + (s - 1) * 0.25 : 0.5 - (1 - s) * 0.4) : s;
     await _tts.setSpeechRate(r.clamp(0.1, Platform.isIOS ? 1.0 : 3.0).toDouble());
   }
 
-  Future<void> setSpeed(double s) async {
-    Prefs.I.setSpeed(s);
-    await _applyRate();
-    notifyListeners();
-    await _restartHere();
-  }
-
-  Future<void> loadVoices() async {
+  Future<void> loadSystemVoices() async {
     try {
       final raw = await _tts.getVoices;
       final list = <Map<String, String>>[];
@@ -265,47 +500,106 @@ class ReaderEngine extends ChangeNotifier {
       }
       int rank(Map<String, String> v) {
         final q = (v['quality'] ?? '').toLowerCase();
-        final spain = (v['locale'] ?? '').toLowerCase().replaceAll('_', '-') == 'es-es' ? 0 : 10;
-        final qq = q.contains('premium') ? 0 : (q.contains('enhanced') ? 1 : 2);
-        return spain + qq;
+        return q.contains('premium') ? 0 : (q.contains('enhanced') ? 1 : 2);
       }
 
-      list.sort((a, b) {
-        final r = rank(a).compareTo(rank(b));
-        return r != 0 ? r : (a['name'] ?? '').compareTo(b['name'] ?? '');
-      });
-      voices = list;
+      list.sort((a, b) => rank(a).compareTo(rank(b)));
+      sysVoices = list;
       notifyListeners();
     } catch (_) {}
   }
 
-  Map<String, String>? get currentVoice {
-    final n = Prefs.I.voiceName;
-    for (final v in voices) {
-      if (v['name'] == n && v['locale'] == Prefs.I.voiceLocale) return v;
+  Map<String, String>? get currentSystemVoice {
+    for (final v in sysVoices) {
+      if (v['name'] == Prefs.I.sysVoiceName && v['locale'] == Prefs.I.sysVoiceLocale) return v;
     }
     return null;
   }
 
-  Future<void> _applyVoice() async {
-    final v = currentVoice ?? (voices.isNotEmpty ? voices.first : null);
-    if (v != null) {
-      await _tts.setVoice({'name': v['name']!, 'locale': v['locale']!});
-    } else {
-      await _tts.setLanguage('es-ES');
+  Future<void> setSystemVoice(Map<String, String> v) async {
+    Prefs.I.setSystemVoice(v['name']!, v['locale']!);
+    await _tts.setVoice({'name': v['name']!, 'locale': v['locale']!});
+    notifyListeners();
+    if (playing && !usingNeural) {
+      await _restartHere();
+    } else if (!playing) {
+      await _tts.speak('Hola, así sueno leyendo tu libro.');
     }
   }
 
-  Future<void> setVoice(Map<String, String> v, {bool preview = true}) async {
-    Prefs.I.setVoice(v['name']!, v['locale']!);
-    await _tts.setVoice({'name': v['name']!, 'locale': v['locale']!});
-    notifyListeners();
-    if (playing) {
-      await _restartHere();
-    } else if (preview) {
-      await _tts.stop();
-      await _tts.speak('Hola, así sueno leyendo tu libro.');
+  Future<void> _speakSystem() async {
+    final c = content;
+    if (c == null) return;
+    final gen = ++_gen;
+    var text = await _textForSpeech(idx);
+    if (gen != _gen || !playing) return;
+    if (readingEnglish) {
+      await _tts.setLanguage('en-US');
+    } else {
+      final v = currentSystemVoice ?? (sysVoices.isNotEmpty ? sysVoices.first : null);
+      if (v != null) await _tts.setVoice({'name': v['name']!, 'locale': v['locale']!});
     }
+    final from = _resumeAt.clamp(0, text.length);
+    _resumeAt = 0;
+    _offset = from;
+    _lastWordStart = from;
+    text = text.substring(from);
+    notifyListeners();
+    _sync();
+    if (text.trim().isEmpty) {
+      _onSystemDone();
+      return;
+    }
+    await _tts.speak(text);
+  }
+
+  void _onSystemDone() {
+    final c = content;
+    if (!playing || c == null || usingNeural) return;
+    final next = idx + 1;
+    if (next >= c.paras.length) {
+      playing = false;
+      notifyListeners();
+      _sync();
+      return;
+    }
+    final timeUp = sleepAt != null && DateTime.now().isAfter(sleepAt!);
+    final chapterEnd = sleepEndOfSection && c.sections.any((s) => s.start == next);
+    idx = next;
+    _save();
+    if (timeUp || chapterEnd) {
+      playing = false;
+      hl.value = null;
+      clearSleep();
+      _sync();
+      return;
+    }
+    _speakSystem();
+  }
+
+  Future<void> _stopAll() async {
+    try {
+      await _player.stop();
+    } catch (_) {}
+    try {
+      await _tts.stop();
+    } catch (_) {}
+  }
+
+  // ------------------------------------------------------------ ajustes
+
+  Future<void> setSpeed(double s) async {
+    Prefs.I.setSpeed(s);
+    await _applySystemRate();
+    notifyListeners();
+    await _restartHere();
+  }
+
+  /// Llamar después de cambiar voces en Ajustes.
+  Future<void> voicesChanged() async {
+    _forceSystem = false;
+    notifyListeners();
+    await _restartHere();
   }
 
   void setUseTranslation(bool v) {
@@ -313,14 +607,9 @@ class ReaderEngine extends ChangeNotifier {
     if (m == null) return;
     m.useTranslation = v;
     Library.I.touch();
-    word.value = null;
+    hl.value = null;
     notifyListeners();
-    if (v) unawaited(Translator.I.ensureModel());
-    if (playing) {
-      _resumeAt = 0;
-      _lastWordStart = 0;
-      _restartHere();
-    }
+    _restartHere();
   }
 
   // ------------------------------------------------------------ temporizador
@@ -385,6 +674,12 @@ class ReaderEngine extends ChangeNotifier {
     return _minutesFor(c.prefix[end] - c.prefix[idx]);
   }
 
+  String get sectionTitle {
+    final c = content;
+    if (c == null || c.sections.isEmpty) return '';
+    return c.sections[c.sectionOf(idx)].title;
+  }
+
   // ------------------------------------------------------------ interno
 
   void _save() {
@@ -397,7 +692,8 @@ class ReaderEngine extends ChangeNotifier {
   void _sync() {
     final m = meta, c = content, h = _handler;
     if (m == null || c == null || h == null || c.sections.isEmpty) return;
-    h.sync(playing, c.sections[c.sectionOf(idx)].title, m.title, m.author);
+    final art = m.hasCover ? Uri.file(Library.I.coverPath(m.id)) : null;
+    h.sync(playing, c.sections[c.sectionOf(idx)].title, m.title, m.author, art);
   }
 }
 
@@ -418,12 +714,13 @@ class ReaderAudioHandler extends BaseAudioHandler {
   @override
   Future<void> skipToPrevious() => ReaderEngine.I.prev();
 
-  void sync(bool playing, String section, String book, String author) {
+  void sync(bool playing, String section, String book, String author, Uri? art) {
     mediaItem.add(MediaItem(
       id: book,
       title: section,
       album: book,
       artist: author.isEmpty ? book : author,
+      artUri: art,
     ));
     playbackState.add(PlaybackState(
       controls: [

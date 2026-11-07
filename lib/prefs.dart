@@ -9,23 +9,38 @@ class Prefs extends ChangeNotifier {
   static final Prefs I = Prefs._();
 
   SharedPreferences? _sp;
+
   double fontSize = 19;
   double speed = 1.0;
-  ReadingTheme theme = ReadingTheme.claro;
-  bool wordHighlight = true;
-  String? voiceName;
-  String? voiceLocale;
+  AppTheme theme = AppTheme.auto;
+  bool followText = true;
+
+  // Voces naturales
+  String narrator = 'daniela';
+  String dialogue = 'davefx';
+  bool dialogueVoice = true;
+  String english = 'ryan';
+
+  // Voz del iPhone (respaldo)
+  bool useSystemVoice = false;
+  String? sysVoiceName;
+  String? sysVoiceLocale;
 
   Future<void> load() async {
     final s = await SharedPreferences.getInstance();
     _sp = s;
     fontSize = s.getDouble('fontSize') ?? 19;
     speed = s.getDouble('speed') ?? 1.0;
-    final t = s.getInt('theme') ?? 0;
-    theme = ReadingTheme.values[t.clamp(0, ReadingTheme.values.length - 1)];
-    wordHighlight = s.getBool('wordHighlight') ?? true;
-    voiceName = s.getString('voiceName');
-    voiceLocale = s.getString('voiceLocale');
+    final t = s.getInt('theme2') ?? 0;
+    theme = AppTheme.values[t.clamp(0, AppTheme.values.length - 1)];
+    followText = s.getBool('followText') ?? true;
+    narrator = s.getString('narrator') ?? 'daniela';
+    dialogue = s.getString('dialogue') ?? 'davefx';
+    dialogueVoice = s.getBool('dialogueVoice') ?? true;
+    english = s.getString('english') ?? 'ryan';
+    useSystemVoice = s.getBool('useSystemVoice') ?? false;
+    sysVoiceName = s.getString('voiceName');
+    sysVoiceLocale = s.getString('voiceLocale');
   }
 
   void setFontSize(double v) {
@@ -40,21 +55,51 @@ class Prefs extends ChangeNotifier {
     notifyListeners();
   }
 
-  void setTheme(ReadingTheme t) {
+  void setTheme(AppTheme t) {
     theme = t;
-    _sp?.setInt('theme', t.index);
+    _sp?.setInt('theme2', t.index);
     notifyListeners();
   }
 
-  void setWordHighlight(bool v) {
-    wordHighlight = v;
-    _sp?.setBool('wordHighlight', v);
+  void setFollowText(bool v) {
+    followText = v;
+    _sp?.setBool('followText', v);
     notifyListeners();
   }
 
-  void setVoice(String name, String locale) {
-    voiceName = name;
-    voiceLocale = locale;
+  void setNarrator(String id) {
+    narrator = id;
+    _sp?.setString('narrator', id);
+    notifyListeners();
+  }
+
+  void setDialogue(String id) {
+    dialogue = id;
+    _sp?.setString('dialogue', id);
+    notifyListeners();
+  }
+
+  void setDialogueVoice(bool v) {
+    dialogueVoice = v;
+    _sp?.setBool('dialogueVoice', v);
+    notifyListeners();
+  }
+
+  void setEnglish(String id) {
+    english = id;
+    _sp?.setString('english', id);
+    notifyListeners();
+  }
+
+  void setUseSystemVoice(bool v) {
+    useSystemVoice = v;
+    _sp?.setBool('useSystemVoice', v);
+    notifyListeners();
+  }
+
+  void setSystemVoice(String name, String locale) {
+    sysVoiceName = name;
+    sysVoiceLocale = locale;
     _sp?.setString('voiceName', name);
     _sp?.setString('voiceLocale', locale);
     notifyListeners();

@@ -1,6 +1,11 @@
+import 'dart:io';
+import 'dart:typed_data';
+import 'dart:ui' as ui;
+
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 
+import '../covers.dart';
 import '../importer.dart';
 import '../library.dart';
 import '../models.dart';
@@ -8,6 +13,7 @@ import '../reader_engine.dart';
 import '../theme.dart';
 import '../widgets/book_cover.dart';
 import 'reader_screen.dart';
+import 'sheets.dart';
 
 class LibraryScreen extends StatefulWidget {
   const LibraryScreen({super.key});
@@ -33,12 +39,19 @@ class _LibraryScreenState extends State<LibraryScreen> {
     });
     try {
       final r = await importBook(path, (p, l) {
-        if (mounted) setState(() {
-          _progress = p;
-          _label = l;
-        });
+        if (mounted) {
+          setState(() {
+            _progress = p;
+            _label = l;
+          });
+        }
       });
-      final meta = await Library.I.add(r);
+      Uint8List? cover;
+      if (path.toLowerCase().endsWith('.pdf')) {
+        setState(() => _label = 'Preparando la portada…');
+        cover = await renderPdfCover(path);
+      }
+      final meta = await Library.I.add(r, cover: cover);
       if (!mounted) return;
       setState(() => _progress = null);
       _open(meta);
@@ -61,21 +74,35 @@ class _LibraryScreenState extends State<LibraryScreen> {
     Navigator.of(context).push(MaterialPageRoute(builder: (_) => ReaderScreen(meta: m)));
   }
 
-  Future<void> _delete(BookMeta m) async {
-    final ok = await showDialog<bool>(
+  Future<void> _menu(BookMeta m) async {
+    final p = pal(context);
+    final action = await showModalBottomSheet<String>(
       context: context,
-      builder: (c) => AlertDialog(
-        title: const Text('¿Borrar este libro?'),
-        content: Text('Se borra «${m.title}» del celular, con su traducción y marcadores.'),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('Cancelar')),
-          FilledButton(onPressed: () => Navigator.pop(c, true), child: const Text('Borrar')),
-        ],
+      builder: (c) => SafeArea(
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(24, 0, 24, 12),
+            child: Row(children: [
+              BookCover(meta: m, width: 44, radius: 6, shadow: false),
+              const SizedBox(width: 14),
+              Expanded(child: Text(m.title, maxLines: 2, overflow: TextOverflow.ellipsis, style: serif(size: 17, weight: FontWeight.w600, color: p.fg))),
+            ]),
+          ),
+          ListTile(leading: const Icon(Icons.play_arrow_rounded), title: const Text('Abrir'), onTap: () => Navigator.pop(c, 'open')),
+          ListTile(
+            leading: Icon(Icons.delete_outline_rounded, color: p.accent),
+            title: Text('Borrar del celular', style: TextStyle(color: p.accent)),
+            onTap: () => Navigator.pop(c, 'del'),
+          ),
+          const SizedBox(height: 8),
+        ]),
       ),
     );
-    if (ok != true) return;
-    if (ReaderEngine.I.meta?.id == m.id) ReaderEngine.I.close();
-    await Library.I.remove(m.id);
+    if (action == 'open') _open(m);
+    if (action == 'del') {
+      if (ReaderEngine.I.meta?.id == m.id) ReaderEngine.I.close();
+      await Library.I.remove(m.id);
+    }
   }
 
   @override
@@ -84,179 +111,315 @@ class _LibraryScreenState extends State<LibraryScreen> {
     return Scaffold(
       floatingActionButton: FloatingActionButton.extended(
         onPressed: _progress == null ? _add : null,
+        backgroundColor: p.fg,
+        foregroundColor: p.bg,
+        elevation: 2,
+        shape: const StadiumBorder(),
         icon: const Icon(Icons.add_rounded),
-        label: const Text('Agregar libro'),
+        label: const Text('Agregar libro', style: TextStyle(fontWeight: FontWeight.w700)),
       ),
       body: ListenableBuilder(
         listenable: Listenable.merge([Library.I, ReaderEngine.I]),
         builder: (context, _) {
           final books = Library.I.books;
           final e = ReaderEngine.I;
-          return CustomScrollView(slivers: [
-            SliverAppBar.large(
-              title: Text('Mis libros', style: serif(size: 30, weight: FontWeight.w600, color: p.fg)),
-              backgroundColor: p.bg,
-            ),
-            if (e.meta != null) SliverToBoxAdapter(child: _NowPlaying(onOpen: () => _open(e.meta!))),
-            if (_progress != null)
+          BookMeta? cont = e.meta;
+          if (cont == null) {
+            for (final b in books) {
+              if (b.position > 0) {
+                cont = b;
+                break;
+              }
+            }
+          }
+          final totalMin = books.fold<int>(0, (a, b) => a + (b.chars * (1 - b.progress) / 950).round());
+          return SafeArea(
+            bottom: false,
+            child: CustomScrollView(slivers: [
               SliverToBoxAdapter(
-                child: _Card(children: [
-                  Text('Importando «$_importName»', style: const TextStyle(fontWeight: FontWeight.w600)),
-                  const SizedBox(height: 10),
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(4),
-                    child: LinearProgressIndicator(value: _progress == 0 ? null : _progress, minHeight: 6),
-                  ),
-                  const SizedBox(height: 8),
-                  Text(_label, style: TextStyle(color: p.muted, fontSize: 13)),
-                ]),
-              ),
-            if (_error != null)
-              SliverToBoxAdapter(
-                child: _Card(children: [
-                  Row(children: [
-                    Icon(Icons.info_outline_rounded, color: p.accent),
-                    const SizedBox(width: 10),
-                    Expanded(child: Text(_error!)),
-                    IconButton(onPressed: () => setState(() => _error = null), icon: const Icon(Icons.close_rounded)),
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 18, 8, 6),
+                  child: Row(children: [
+                    Expanded(
+                      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                        Text('Biblioteca',
+                            style: TextStyle(fontSize: 34, fontWeight: FontWeight.w800, letterSpacing: -1.0, color: p.fg)),
+                        const SizedBox(height: 2),
+                        Text(
+                          books.isEmpty
+                              ? 'Tus libros, para escuchar'
+                              : '${books.length} ${books.length == 1 ? 'libro' : 'libros'} · ${fmtMinutes(totalMin)} por escuchar',
+                          style: TextStyle(color: p.muted, fontWeight: FontWeight.w600),
+                        ),
+                      ]),
+                    ),
+                    IconButton(
+                      tooltip: 'Apariencia',
+                      onPressed: () => showDisplaySheet(context),
+                      icon: const Icon(Icons.palette_outlined),
+                    ),
                   ]),
-                ]),
-              ),
-            if (books.isEmpty && _progress == null)
-              SliverFillRemaining(hasScrollBody: false, child: _Empty(onAdd: _add))
-            else
-              SliverPadding(
-                padding: const EdgeInsets.fromLTRB(16, 8, 16, 100),
-                sliver: SliverList.separated(
-                  itemCount: books.length,
-                  separatorBuilder: (_, __) => Divider(height: 1, color: p.line),
-                  itemBuilder: (context, i) => _BookTile(
-                    meta: books[i],
-                    onTap: () => _open(books[i]),
-                    onDelete: () => _delete(books[i]),
-                  ),
                 ),
               ),
-          ]);
+              if (cont != null) SliverToBoxAdapter(child: _ContinueCard(meta: cont, onOpen: () => _open(cont!))),
+              if (_progress != null) SliverToBoxAdapter(child: _ImportCard(name: _importName ?? '', progress: _progress!, label: _label)),
+              if (_error != null)
+                SliverToBoxAdapter(
+                  child: _Notice(text: _error!, onClose: () => setState(() => _error = null)),
+                ),
+              if (books.isEmpty && _progress == null)
+                SliverFillRemaining(hasScrollBody: false, child: _Empty(onAdd: _add))
+              else ...[
+                SliverToBoxAdapter(
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(20, 18, 20, 12),
+                    child: Text('TUS LIBROS', style: label(p.muted)),
+                  ),
+                ),
+                SliverPadding(
+                  padding: const EdgeInsets.fromLTRB(20, 0, 20, 110),
+                  sliver: SliverGrid(
+                    gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
+                      maxCrossAxisExtent: 180,
+                      mainAxisSpacing: 26,
+                      crossAxisSpacing: 18,
+                      childAspectRatio: 0.47,
+                    ),
+                    delegate: SliverChildBuilderDelegate(
+                      (context, i) => _BookTile(meta: books[i], onTap: () => _open(books[i]), onMenu: () => _menu(books[i])),
+                      childCount: books.length,
+                    ),
+                  ),
+                ),
+              ],
+            ]),
+          );
         },
       ),
     );
   }
 }
 
-class _Card extends StatelessWidget {
-  final List<Widget> children;
-  const _Card({required this.children});
-  @override
-  Widget build(BuildContext context) {
-    final p = pal(context);
-    return Container(
-      margin: const EdgeInsets.fromLTRB(16, 4, 16, 12),
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(color: p.surface, borderRadius: BorderRadius.circular(16), border: Border.all(color: p.line)),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: children),
-    );
-  }
-}
+// ------------------------------------------------------------ seguir escuchando
 
-class _NowPlaying extends StatelessWidget {
+class _ContinueCard extends StatelessWidget {
+  final BookMeta meta;
   final VoidCallback onOpen;
-  const _NowPlaying({required this.onOpen});
+  const _ContinueCard({required this.meta, required this.onOpen});
+
   @override
   Widget build(BuildContext context) {
-    final p = pal(context);
     final e = ReaderEngine.I;
-    final m = e.meta!, c = e.content!;
-    final section = c.sections[c.sectionOf(e.idx)].title;
-    return GestureDetector(
-      onTap: onOpen,
-      child: Container(
-        margin: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-        padding: const EdgeInsets.all(14),
-        decoration: BoxDecoration(color: p.highlight, borderRadius: BorderRadius.circular(18)),
-        child: Row(children: [
-          BookCover(meta: m, width: 52),
-          const SizedBox(width: 14),
-          Expanded(
-            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text(e.playing ? 'ESCUCHANDO' : 'SEGUÍ DONDE QUEDASTE',
-                  style: TextStyle(fontSize: 11, letterSpacing: 1.1, fontWeight: FontWeight.w700, color: p.accent)),
-              const SizedBox(height: 4),
-              Text(m.title, maxLines: 1, overflow: TextOverflow.ellipsis, style: serif(size: 16, weight: FontWeight.w600, color: p.fg)),
-              Text(section, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(color: p.muted, fontSize: 13)),
-            ]),
-          ),
-          IconButton.filled(
-            iconSize: 30,
-            onPressed: e.toggle,
-            icon: Icon(e.playing ? Icons.pause_rounded : Icons.play_arrow_rounded),
-          ),
-        ]),
+    final isCurrent = e.meta?.id == meta.id;
+    final playing = isCurrent && e.playing;
+    final left = (meta.chars * (1 - meta.progress) / 950).round();
+    final h = meta.hue.toDouble();
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 14, 16, 4),
+      child: GestureDetector(
+        onTap: onOpen,
+        child: Container(
+          height: 196,
+          clipBehavior: Clip.antiAlias,
+          decoration: BoxDecoration(borderRadius: BorderRadius.circular(28)),
+          child: Stack(fit: StackFit.expand, children: [
+            if (meta.hasCover)
+              ImageFiltered(
+                imageFilter: ui.ImageFilter.blur(sigmaX: 36, sigmaY: 36),
+                child: Transform.scale(
+                  scale: 1.4,
+                  child: Image.file(File(Library.I.coverPath(meta.id)), fit: BoxFit.cover, cacheWidth: 200),
+                ),
+              )
+            else
+              DecoratedBox(
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(colors: [
+                    HSLColor.fromAHSL(1, h, 0.45, 0.35).toColor(),
+                    HSLColor.fromAHSL(1, (h + 35) % 360, 0.5, 0.18).toColor(),
+                  ]),
+                ),
+              ),
+            DecoratedBox(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                  colors: [Colors.black.withValues(alpha: 0.25), Colors.black.withValues(alpha: 0.6)],
+                ),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.all(18),
+              child: Row(children: [
+                BookCover(meta: meta, width: 100, radius: 10),
+                const SizedBox(width: 18),
+                Expanded(
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisAlignment: MainAxisAlignment.center, children: [
+                    Text(playing ? 'ESCUCHANDO' : 'SEGUÍ ESCUCHANDO', style: label(Colors.white.withValues(alpha: 0.8))),
+                    const SizedBox(height: 6),
+                    Text(meta.title,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: serif(size: 20, weight: FontWeight.w600, color: Colors.white, height: 1.2)),
+                    if (isCurrent && e.sectionTitle.isNotEmpty) ...[
+                      const SizedBox(height: 4),
+                      Text(e.sectionTitle,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(color: Colors.white.withValues(alpha: 0.75), fontSize: 13)),
+                    ],
+                    const Spacer(),
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(3),
+                      child: LinearProgressIndicator(
+                        value: meta.progress,
+                        minHeight: 4,
+                        color: Colors.white,
+                        backgroundColor: Colors.white.withValues(alpha: 0.25),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Row(children: [
+                      Expanded(
+                        child: Text('${(meta.progress * 100).round()} % · faltan ${fmtMinutes(left)}',
+                            style: TextStyle(
+                                color: Colors.white.withValues(alpha: 0.85),
+                                fontSize: 12.5,
+                                fontWeight: FontWeight.w600,
+                                fontFeatures: const [FontFeature.tabularFigures()])),
+                      ),
+                      Material(
+                        color: Colors.white,
+                        shape: const CircleBorder(),
+                        child: InkWell(
+                          customBorder: const CircleBorder(),
+                          onTap: () async {
+                            if (!isCurrent) await e.open(meta);
+                            if (context.mounted) await playOrAskVoice(context);
+                          },
+                          child: SizedBox(
+                            width: 48,
+                            height: 48,
+                            child: Icon(playing ? Icons.pause_rounded : Icons.play_arrow_rounded, color: Colors.black, size: 30),
+                          ),
+                        ),
+                      ),
+                    ]),
+                  ]),
+                ),
+              ]),
+            ),
+          ]),
+        ),
       ),
     );
   }
 }
 
+// ------------------------------------------------------------ grilla
+
 class _BookTile extends StatelessWidget {
   final BookMeta meta;
-  final VoidCallback onTap, onDelete;
-  const _BookTile({required this.meta, required this.onTap, required this.onDelete});
+  final VoidCallback onTap, onMenu;
+  const _BookTile({required this.meta, required this.onTap, required this.onMenu});
 
   @override
   Widget build(BuildContext context) {
     final p = pal(context);
     final pct = (meta.progress * 100).round();
-    final left = (meta.chars * (1 - meta.progress) / 950).round();
-    return InkWell(
+    String? chip;
+    if (meta.isEnglish) {
+      chip = meta.translated == 0 ? 'EN' : (meta.fullyTranslated ? 'ES' : '${(meta.translated * 100 / meta.paraCount).round()} %');
+    }
+    return GestureDetector(
       onTap: onTap,
-      onLongPress: onDelete,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 14),
-        child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          BookCover(meta: meta),
-          const SizedBox(width: 16),
-          Expanded(
-            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text(meta.title, maxLines: 2, overflow: TextOverflow.ellipsis, style: serif(size: 17, weight: FontWeight.w600, color: p.fg, height: 1.25)),
-              if (meta.author.isNotEmpty) ...[
-                const SizedBox(height: 2),
-                Text(meta.author, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(color: p.muted, fontSize: 13)),
-              ],
-              const SizedBox(height: 10),
-              ClipRRect(
-                borderRadius: BorderRadius.circular(3),
-                child: LinearProgressIndicator(value: meta.progress, minHeight: 4, backgroundColor: p.line),
+      onLongPress: onMenu,
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        AspectRatio(
+          aspectRatio: 2 / 3,
+          child: Stack(fit: StackFit.expand, children: [
+            BookCover(meta: meta, radius: 14),
+            if (chip != null)
+              Positioned(
+                top: 8,
+                left: 8,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                  decoration: BoxDecoration(color: Colors.black.withValues(alpha: 0.55), borderRadius: BorderRadius.circular(20)),
+                  child: Row(mainAxisSize: MainAxisSize.min, children: [
+                    const Icon(Icons.translate_rounded, size: 11, color: Colors.white),
+                    const SizedBox(width: 4),
+                    Text(chip, style: const TextStyle(color: Colors.white, fontSize: 10.5, fontWeight: FontWeight.w800)),
+                  ]),
+                ),
               ),
-              const SizedBox(height: 6),
-              Wrap(spacing: 8, runSpacing: 4, crossAxisAlignment: WrapCrossAlignment.center, children: [
-                Text(pct == 0 ? 'Sin empezar · ${fmtMinutes(left)}' : '$pct % · faltan ${fmtMinutes(left)}',
-                    style: TextStyle(color: p.muted, fontSize: 12.5, fontFeatures: const [FontFeature.tabularFigures()])),
-                if (meta.pages > 0) Text('${fmtThousands(meta.pages)} pág.', style: TextStyle(color: p.muted, fontSize: 12.5)),
-                if (meta.isEnglish) _Chip(meta.translated == 0 ? 'Inglés' : (meta.fullyTranslated ? 'Traducido' : 'Traduciendo ${(meta.translated * 100 / meta.paraCount).round()} %')),
-              ]),
-            ]),
-          ),
-          PopupMenuButton<String>(
-            icon: Icon(Icons.more_vert_rounded, color: p.muted),
-            onSelected: (v) => v == 'del' ? onDelete() : null,
-            itemBuilder: (_) => const [PopupMenuItem(value: 'del', child: Text('Borrar libro'))],
-          ),
-        ]),
-      ),
+          ]),
+        ),
+        const SizedBox(height: 10),
+        ClipRRect(
+          borderRadius: BorderRadius.circular(2),
+          child: LinearProgressIndicator(value: meta.progress, minHeight: 3, color: p.accent, backgroundColor: p.line),
+        ),
+        const SizedBox(height: 8),
+        Text(meta.title,
+            maxLines: 2, overflow: TextOverflow.ellipsis, style: TextStyle(fontWeight: FontWeight.w700, fontSize: 14, height: 1.25, color: p.fg)),
+        const SizedBox(height: 2),
+        Text(
+          pct == 0 ? (meta.author.isNotEmpty ? meta.author : 'Sin empezar') : '$pct % escuchado',
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: TextStyle(color: p.muted, fontSize: 12.5, fontWeight: FontWeight.w600),
+        ),
+      ]),
     );
   }
 }
 
-class _Chip extends StatelessWidget {
-  final String text;
-  const _Chip(this.text);
+class _ImportCard extends StatelessWidget {
+  final String name, label;
+  final double progress;
+  const _ImportCard({required this.name, required this.progress, required this.label});
+
   @override
   Widget build(BuildContext context) {
     final p = pal(context);
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-      decoration: BoxDecoration(color: p.highlight, borderRadius: BorderRadius.circular(20)),
-      child: Text(text, style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w600, color: p.accent)),
+      margin: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(color: p.surface, borderRadius: BorderRadius.circular(20)),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text('Importando «$name»', maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.w700)),
+        const SizedBox(height: 10),
+        ClipRRect(
+          borderRadius: BorderRadius.circular(4),
+          child: LinearProgressIndicator(value: progress == 0 ? null : progress, minHeight: 6, color: p.accent, backgroundColor: p.line),
+        ),
+        const SizedBox(height: 8),
+        Text(label, style: TextStyle(color: p.muted, fontSize: 13)),
+      ]),
+    );
+  }
+}
+
+class _Notice extends StatelessWidget {
+  final String text;
+  final VoidCallback onClose;
+  const _Notice({required this.text, required this.onClose});
+
+  @override
+  Widget build(BuildContext context) {
+    final p = pal(context);
+    return Container(
+      margin: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+      padding: const EdgeInsets.fromLTRB(16, 8, 4, 8),
+      decoration: BoxDecoration(color: p.hl, borderRadius: BorderRadius.circular(18)),
+      child: Row(children: [
+        Icon(Icons.info_outline_rounded, color: p.accent),
+        const SizedBox(width: 12),
+        Expanded(child: Text(text, style: const TextStyle(height: 1.4))),
+        IconButton(onPressed: onClose, icon: const Icon(Icons.close_rounded)),
+      ]),
     );
   }
 }
@@ -264,6 +427,7 @@ class _Chip extends StatelessWidget {
 class _Empty extends StatelessWidget {
   final VoidCallback onAdd;
   const _Empty({required this.onAdd});
+
   @override
   Widget build(BuildContext context) {
     final p = pal(context);
@@ -271,16 +435,16 @@ class _Empty extends StatelessWidget {
       padding: const EdgeInsets.fromLTRB(32, 0, 32, 120),
       child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
         Container(
-          width: 96,
-          height: 96,
-          decoration: BoxDecoration(color: p.highlight, shape: BoxShape.circle),
-          child: Icon(Icons.headphones_rounded, size: 44, color: p.accent),
+          width: 104,
+          height: 104,
+          decoration: BoxDecoration(color: p.hl, shape: BoxShape.circle),
+          child: Icon(Icons.headphones_rounded, size: 46, color: p.accent),
         ),
         const SizedBox(height: 24),
-        Text('Tu biblioteca está vacía', style: serif(size: 22, weight: FontWeight.w600, color: p.fg)),
+        Text('Tu biblioteca está vacía', style: TextStyle(fontSize: 22, fontWeight: FontWeight.w800, color: p.fg)),
         const SizedBox(height: 8),
         Text(
-          'Agregá un PDF, EPUB o TXT desde Archivos, iCloud o Drive y escuchalo como audiolibro. Si está en inglés, te lo traduzco.',
+          'Agregá un PDF, EPUB o TXT desde Archivos, iCloud o Drive y escuchalo con una voz natural. Si está en inglés, te lo traduzco.',
           textAlign: TextAlign.center,
           style: TextStyle(color: p.muted, height: 1.5),
         ),

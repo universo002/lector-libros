@@ -60,6 +60,7 @@ class BookMeta {
   int position;
   int translated;
   bool useTranslation;
+  bool hasCover;
   List<int> bookmarks;
   DateTime added;
   DateTime opened;
@@ -77,6 +78,7 @@ class BookMeta {
     this.position = 0,
     this.translated = 0,
     this.useTranslation = false,
+    this.hasCover = false,
     List<int>? bookmarks,
     DateTime? added,
     DateTime? opened,
@@ -101,6 +103,7 @@ class BookMeta {
         'position': position,
         'translated': translated,
         'useTranslation': useTranslation,
+        'hasCover': hasCover,
         'bookmarks': bookmarks,
         'added': added.toIso8601String(),
         'opened': opened.toIso8601String(),
@@ -119,6 +122,7 @@ class BookMeta {
         position: ((m['position'] ?? 0) as num).toInt(),
         translated: ((m['translated'] ?? 0) as num).toInt(),
         useTranslation: (m['useTranslation'] ?? false) as bool,
+        hasCover: (m['hasCover'] ?? false) as bool,
         bookmarks: ((m['bookmarks'] ?? []) as List).map((e) => (e as num).toInt()).toList(),
         added: DateTime.tryParse((m['added'] ?? '') as String),
         opened: DateTime.tryParse((m['opened'] ?? '') as String),

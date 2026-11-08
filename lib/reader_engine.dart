@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:audio_service/audio_service.dart';
 import 'package:flutter/foundation.dart';
@@ -40,6 +41,29 @@ String _norm(String s) => s
     .replaceAll('í', 'i')
     .replaceAll('ó', 'o')
     .replaceAll('ú', 'u');
+
+/// Nombre para mostrar de una voz (en Android los nombres son códigos como «es-us-x-esd-local»).
+String voiceLabel(NativeVoice v) {
+  final n = v.name;
+  final i = n.indexOf('-x-');
+  if (i >= 0) {
+    final code = n.substring(i + 3).split(RegExp(r'[-#]')).first.toUpperCase();
+    return 'Voz $code';
+  }
+  return n;
+}
+
+String regionOf(String lang) {
+  final x = lang.toLowerCase().replaceAll('_', '-');
+  if (x == 'es-es') return 'España';
+  if (x == 'es-mx') return 'México';
+  if (x == 'es-us') return 'Latino (EE. UU.)';
+  if (x == 'es-419') return 'Latinoamérica';
+  if (x == 'es-ar') return 'Argentina';
+  if (x == 'es-co') return 'Colombia';
+  if (x == 'es-cl') return 'Chile';
+  return lang;
+}
 
 /// Junta frases muy cortas seguidas del mismo tipo: la voz suena más fluida.
 List<Seg> mergedSegments(String text) {
@@ -93,6 +117,7 @@ class ReaderEngine extends ChangeNotifier {
   NativeVoice? female;
   NativeVoice? male;
   NativeVoice? english;
+  List<NativeVoice> spanishVoices = [];
 
   // Temporizador
   DateTime? sleepAt;
@@ -133,6 +158,38 @@ class ReaderEngine extends ChangeNotifier {
     final latino = Prefs.I.latino;
     female = _pick(es, latino ? _femaleLatam : _femaleSpain, 2, latino);
     male = _pick(es, latino ? _maleLatam : _maleSpain, 1, latino);
+    // En Android las voces no siempre dicen si son de hombre o de mujer: elegimos dos distintas
+    // y se pueden cambiar a mano en «Voces».
+    if (Platform.isAndroid) {
+      final sorted = List<NativeVoice>.of(es)
+        ..sort((a, b) {
+          final ax = (a.lang.toLowerCase() == 'es-es') == latino ? 1 : 0;
+          final bx = (b.lang.toLowerCase() == 'es-es') == latino ? 1 : 0;
+          if (ax != bx) return ax - bx;
+          return b.quality.compareTo(a.quality);
+        });
+      female ??= sorted.isNotEmpty ? sorted.first : null;
+      if (male == null) {
+        for (final v in sorted) {
+          if (v.id != female?.id) {
+            male = v;
+            break;
+          }
+        }
+      }
+    }
+    // Elección manual del usuario.
+    NativeVoice? byId(String? id) {
+      if (id == null) return null;
+      for (final v in es) {
+        if (v.id == id) return v;
+      }
+      return null;
+    }
+
+    female = byId(Prefs.I.femaleVoiceId) ?? female;
+    male = byId(Prefs.I.maleVoiceId) ?? male;
+    spanishVoices = es;
     english = _pick(en, const ['ava', 'samantha', 'zoe', 'allison', 'susan'], 2, false) ??
         _pick(en, const ['evan', 'nathan', 'tom', 'alex'], 1, false);
     notifyListeners();
@@ -181,8 +238,8 @@ class ReaderEngine extends ChangeNotifier {
 
   String get currentVoiceLabel {
     final n = narrator;
-    if (n == null) return 'Voz del iPhone';
-    return n.quality >= 2 ? '${n.name} · ${n.qualityLabel}' : n.name;
+    if (n == null) return 'Voz del sistema';
+    return n.quality >= 2 ? '${voiceLabel(n)} · ${n.qualityLabel}' : voiceLabel(n);
   }
 
   // ------------------------------------------------------------ libro
@@ -668,7 +725,7 @@ class ReaderEngine extends ChangeNotifier {
         id: -1,
         text: english
             ? 'Hello. This is how I sound reading your book.'
-            : 'Hola, soy ${v.name}. Así sueno cuando leo tu libro, frase por frase.',
+            : 'Hola. Así sueno cuando leo tu libro, frase por frase.',
         voiceId: v.id,
         lang: v.lang,
         rate: _rate(Prefs.I.speed * _voiceFactor(v)),

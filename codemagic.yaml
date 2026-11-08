@@ -97,3 +97,69 @@ workflows:
     artifacts:
       - build/ipa/Lector.ipa
       - build/logs/*.log
+
+  android-apk:
+    name: Android (APK)
+    instance_type: mac_mini_m2
+    max_build_duration: 60
+    environment:
+      flutter: stable
+      java: 17
+    scripts:
+      - name: Crear la carpeta de Android si no existe
+        script: |
+          set -e
+          if [ ! -d android ]; then
+            flutter create --platforms=android --org com.banessa --project-name lector_libros .
+          fi
+
+      - name: Ajustes de Android (permisos, segundo plano, voz)
+        script: |
+          set -e
+          python3 - <<'PY'
+          import glob, pathlib, re
+          m = pathlib.Path('android/app/src/main/AndroidManifest.xml')
+          s = m.read_text()
+          for p in ['android.permission.INTERNET', 'android.permission.WAKE_LOCK',
+                    'android.permission.FOREGROUND_SERVICE',
+                    'android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK',
+                    'android.permission.POST_NOTIFICATIONS']:
+              if p not in s:
+                  s = s.replace('<application', '<uses-permission android:name="%s"/>\n    <application' % p, 1)
+          if 'com.ryanheise.audioservice.AudioService' not in s:
+              svc = ('<service android:name="com.ryanheise.audioservice.AudioService" '
+                     'android:foregroundServiceType="mediaPlayback" android:exported="true">'
+                     '<intent-filter><action android:name="android.media.browse.MediaBrowserService"/></intent-filter>'
+                     '</service>\n        '
+                     '<receiver android:name="com.ryanheise.audioservice.MediaButtonReceiver" android:exported="true">'
+                     '<intent-filter><action android:name="android.intent.action.MEDIA_BUTTON"/></intent-filter>'
+                     '</receiver>\n    ')
+              s = s.replace('</application>', svc + '</application>', 1)
+          if 'TTS_SERVICE' not in s:
+              q = '<intent><action android:name="android.intent.action.TTS_SERVICE"/></intent>'
+              if '<queries>' in s:
+                  s = s.replace('<queries>', '<queries>\n        ' + q, 1)
+              else:
+                  s = s.replace('</manifest>', '<queries>' + q + '</queries>\n</manifest>', 1)
+          s = re.sub(r'android:label="[^"]*"', 'android:label="Lector"', s, count=1)
+          m.write_text(s)
+          for f in glob.glob('android/app/src/main/kotlin/**/MainActivity.kt', recursive=True):
+              t = pathlib.Path(f).read_text()
+              pkg = re.search(r'^package\s+([\w.]+)', t, re.M).group(1)
+              pathlib.Path(f).write_text(
+                  'package %s\n\nimport com.ryanheise.audioservice.AudioServiceActivity\n\n'
+                  'class MainActivity : AudioServiceActivity()\n' % pkg)
+          print(s)
+          PY
+
+      - name: Compilar el APK
+        script: |
+          set -e
+          flutter pub get
+          flutter build apk --release
+          mkdir -p build/apk
+          cp build/app/outputs/flutter-apk/app-release.apk build/apk/Lector.apk
+          ls -lh build/apk/Lector.apk
+
+    artifacts:
+      - build/apk/Lector.apk

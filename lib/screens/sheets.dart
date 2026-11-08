@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:lector_tts/lector_tts.dart';
@@ -95,6 +97,7 @@ class _VoiceSheet extends StatelessWidget {
                 fallbackName: fName,
                 role: pr.narratorMale ? 'Personajes' : 'Narra',
                 selected: !pr.narratorMale,
+                maleSlot: false,
                 speed: pr.speedFemale,
                 onSelect: () {
                   pr.setNarratorMale(false);
@@ -111,6 +114,7 @@ class _VoiceSheet extends StatelessWidget {
                 fallbackName: mName,
                 role: pr.narratorMale ? 'Narra' : 'Personajes',
                 selected: pr.narratorMale,
+                maleSlot: true,
                 speed: pr.speedMale,
                 onSelect: () {
                   pr.setNarratorMale(true);
@@ -121,7 +125,7 @@ class _VoiceSheet extends StatelessWidget {
               ),
             ),
           ]),
-          if (needsBetter || f == null || m == null)
+          if (needsBetter || f == null || m == null || Platform.isAndroid)
             Container(
               margin: const EdgeInsets.only(top: 14),
               padding: const EdgeInsets.all(14),
@@ -134,10 +138,14 @@ class _VoiceSheet extends StatelessWidget {
                 ]),
                 const SizedBox(height: 6),
                 Text(
-                  '${m == null ? 'Todavía no tenés una voz de hombre instalada. ' : ''}'
-                  'En el iPhone: Ajustes › Accesibilidad › Leer y hablar (Read & Speak) › Voces › Español › $region. '
-                  'Descargá «$fName (Mejorada)» y «$mName (Mejorada)», o «Premium» si aparece. '
-                  'Si no lo encontrás, buscá «Voces» con la lupa de Ajustes. Después cerrá y abrí esta pantalla.',
+                  Platform.isAndroid
+                      ? 'En Android: Ajustes › Accesibilidad › Salida de texto a voz. Elegí «Servicios de voz de Google» como motor, '
+                          'tocá el engranaje › Instalar datos de voz › ${pr.latino ? 'Español (Estados Unidos), que es el español latino' : 'Español (España)'}, '
+                          'y descargá las voces. Después usá «Cambiar voz» para elegir una de mujer y una de hombre.'
+                      : '${m == null ? 'Todavía no tenés una voz de hombre instalada. ' : ''}'
+                          'En el iPhone: Ajustes › Accesibilidad › Leer y hablar (Read & Speak) › Voces › Español › $region. '
+                          'Descargá «$fName (Mejorada)» y «$mName (Mejorada)», o «Premium» si aparece. '
+                          'Si no lo encontrás, buscá «Voces» con la lupa de Ajustes. Después cerrá y abrí esta pantalla.',
                   style: const TextStyle(height: 1.45),
                 ),
               ]),
@@ -211,6 +219,7 @@ class _VoiceCard extends StatelessWidget {
   final NativeVoice? voice;
   final String fallbackName, role;
   final bool selected;
+  final bool maleSlot;
   final double speed;
   final VoidCallback onSelect;
   final ValueChanged<double> onSpeed, onSpeedEnd;
@@ -220,6 +229,7 @@ class _VoiceCard extends StatelessWidget {
     required this.fallbackName,
     required this.role,
     required this.selected,
+    required this.maleSlot,
     required this.speed,
     required this.onSelect,
     required this.onSpeed,
@@ -245,7 +255,7 @@ class _VoiceCard extends StatelessWidget {
             CircleAvatar(
               radius: 18,
               backgroundColor: selected ? p.accent : p.surface,
-              child: Text((v?.name ?? fallbackName).substring(0, 1),
+              child: Text(maleSlot ? 'H' : 'M',
                   style: TextStyle(fontWeight: FontWeight.w800, color: selected ? p.onAccent : p.fg)),
             ),
             const Spacer(),
@@ -258,9 +268,16 @@ class _VoiceCard extends StatelessWidget {
             ),
           ]),
           const SizedBox(height: 8),
-          Text(v?.name ?? fallbackName, style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 17)),
-          Text(v == null ? 'No instalada' : '${v.qualityLabel} · $role',
-              style: TextStyle(color: p.muted, fontSize: 12.5, fontWeight: FontWeight.w600)),
+          Text(v == null ? fallbackName : voiceLabel(v),
+              maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 17)),
+          Text(v == null ? 'No instalada' : '${regionOf(v.lang)} · ${v.qualityLabel}',
+              maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(color: p.muted, fontSize: 12.5, fontWeight: FontWeight.w600)),
+          Text(role, style: TextStyle(color: p.accent, fontSize: 12, fontWeight: FontWeight.w800)),
+          TextButton(
+            style: TextButton.styleFrom(padding: EdgeInsets.zero, visualDensity: VisualDensity.compact),
+            onPressed: () => _pickVoice(context, maleSlot),
+            child: const Text('Cambiar voz'),
+          ),
           const SizedBox(height: 6),
           Row(children: [
             Icon(Icons.speed_rounded, size: 16, color: p.muted),
@@ -282,6 +299,37 @@ class _VoiceCard extends StatelessWidget {
       ),
     );
   }
+}
+
+void _pickVoice(BuildContext context, bool maleSlot) {
+  final e = ReaderEngine.I;
+  _sheet(context, tall: true, (c) {
+    final p = pal(c);
+    return ListenableBuilder(
+      listenable: Listenable.merge([e, Prefs.I]),
+      builder: (c, _) {
+        final cur = maleSlot ? e.male : e.female;
+        final list = List<NativeVoice>.of(e.spanishVoices)..sort((a, b) => b.quality.compareTo(a.quality));
+        return ListView(padding: const EdgeInsets.fromLTRB(22, 0, 22, 28), children: [
+          _title(c, maleSlot ? 'Voz de hombre' : 'Voz de mujer', sub: 'Tocá ▶ para escuchar y tocá la voz para elegirla.'),
+          if (list.isEmpty) Text('No encontré voces en español instaladas.', style: TextStyle(color: p.muted)),
+          for (final v in list)
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: Icon(cur?.id == v.id ? Icons.check_circle_rounded : Icons.circle_outlined,
+                  color: cur?.id == v.id ? p.accent : p.line),
+              title: Text(voiceLabel(v), style: const TextStyle(fontWeight: FontWeight.w700)),
+              subtitle: Text('${regionOf(v.lang)} · ${v.qualityLabel}'),
+              trailing: IconButton(onPressed: () => e.preview(v), icon: const Icon(Icons.play_circle_outline_rounded)),
+              onTap: () {
+                Prefs.I.setVoiceFor(maleSlot, v.id);
+                e.voicesChanged(reload: true);
+              },
+            ),
+        ]);
+      },
+    );
+  });
 }
 
 class _DialogueOption extends StatelessWidget {

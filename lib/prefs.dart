@@ -31,6 +31,8 @@ class Prefs extends ChangeNotifier {
   // Voz
   bool narratorMale = false; // false = la voz de mujer narra; true = la de hombre
   bool latino = true; // acento: latino (México) o España
+  String? femaleVoiceId; // voz de mujer elegida a mano (si no, se elige sola)
+  String? maleVoiceId;
   double speed = 0.9; // velocidad general
   double speedFemale = 1.0; // ajuste fino de la voz de mujer
   double speedMale = 1.0; // ajuste fino de la voz de hombre
@@ -55,6 +57,8 @@ class Prefs extends ChangeNotifier {
     focusMode = s.getBool('focusMode') ?? false;
     narratorMale = s.getBool('narratorMale') ?? false;
     latino = s.getBool('latino') ?? true;
+    femaleVoiceId = s.getString('femaleVoiceId');
+    maleVoiceId = s.getString('maleVoiceId');
     speed = s.getDouble('speed3') ?? 0.9;
     speedFemale = s.getDouble('speedFemale') ?? 1.0;
     speedMale = s.getDouble('speedMale') ?? 1.0;
@@ -116,6 +120,22 @@ class Prefs extends ChangeNotifier {
   void setLatino(bool v) {
     latino = v;
     _b('latino', v);
+    // Al cambiar de acento, vuelve a elegir las voces solas.
+    femaleVoiceId = null;
+    maleVoiceId = null;
+    _sp?.remove('femaleVoiceId');
+    _sp?.remove('maleVoiceId');
+    notifyListeners();
+  }
+
+  void setVoiceFor(bool maleSlot, String id) {
+    if (maleSlot) {
+      maleVoiceId = id;
+      _sp?.setString('maleVoiceId', id);
+    } else {
+      femaleVoiceId = id;
+      _sp?.setString('femaleVoiceId', id);
+    }
     notifyListeners();
   }
 

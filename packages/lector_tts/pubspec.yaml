@@ -1,6 +1,6 @@
 name: lector_tts
-description: Voz nativa de iOS (AVSpeechSynthesizer) para la app Lector.
-version: 0.0.1
+description: Voz nativa (iOS AVSpeechSynthesizer y Android TextToSpeech) para la app Lector.
+version: 0.0.2
 publish_to: 'none'
 
 environment:
@@ -15,4 +15,7 @@ flutter:
   plugin:
     platforms:
       ios:
+        pluginClass: LectorTtsPlugin
+      android:
+        package: com.lector.lector_tts
         pluginClass: LectorTtsPlugin
